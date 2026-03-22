@@ -1,0 +1,45 @@
+# ============================================================
+#  tradebot / requirements.txt
+#  Install all dependencies:
+#    pip install -r requirements.txt
+# ============================================================
+
+# Core data
+pandas>=2.0
+numpy>=1.24
+python-dateutil>=2.8
+pytz>=2023.3
+
+# Market data (free fallback)
+yfinance>=0.2.36
+
+# Technical indicators
+ta>=0.11.0
+
+# Statistics & ML (Phase 2+)
+scipy>=1.11
+scikit-learn>=1.3
+xgboost>=2.0
+lightgbm>=4.0
+
+# Broker APIs — install the ones you use
+# Zerodha (execution only, free post Apr 2025 — data costs Rs.2000/mo)
+# kiteconnect>=4.2.0
+
+# Fyers (FREE — execution + data, no monthly charges)
+# fyers-apiv3>=3.0.0
+
+# Angel One SmartAPI (FREE — execution + data, best for MCX)
+# smartapi-python>=1.5.5
+# pyotp>=2.9.0              # for Angel One TOTP auto-login
+
+# Shoonya / Finvasia (FREE + zero F&O brokerage — best for live scaling)
+# NorenRestApiPy>=1.0.0
+
+# Dashboard
+streamlit>=1.28
+
+# Utilities
+requests>=2.31
+python-dotenv>=1.0
+flask>=3.0

@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: tradebot-dashboard
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn webapp.app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4
+    healthCheckPath: /health
+    envVars:
+      - key: TRADEBOT_KEY
+        generateValue: true
+      - key: DATA_DIR
+        value: /tmp
