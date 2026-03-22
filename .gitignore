@@ -15,6 +15,8 @@ env/
 
 # Environment and secrets
 .env
+.env.*
+!.env.example
 *.env
 
 # Database files

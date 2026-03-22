@@ -3,6 +3,7 @@
 #  Central configuration — edit this file, nothing else
 # ============================================================
 
+import os
 from pathlib import Path
 
 # ── Paths ────────────────────────────────────────────────────
@@ -171,3 +172,12 @@ LOGGING = {
     "max_mb":       50,                 # rotate log file at 50 MB
     "backup_count": 5,
 }
+
+# ── Web App (Railway dashboard) ──────────────────────────────
+# WEBAPP_KEY and WEBAPP_URL are read from environment variables — never
+# hardcode secrets here because this file is in a public git repo.
+# Set these in your shell / .env file locally:
+#   export TRADEBOT_KEY="your_secret"
+#   export WEBAPP_URL="https://tradebot-production-c63c.up.railway.app"
+WEBAPP_KEY = os.environ.get("TRADEBOT_KEY", "")
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://tradebot-production-c63c.up.railway.app")
