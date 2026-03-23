@@ -42,6 +42,9 @@ Thumbs.db
 *.zip
 
 # Data caches
-tradebot_v5_final/tradebot/data/raw/
-tradebot_v5_final/tradebot/data/processed/
-tradebot_v5_final/tradebot/data/cache/
+tradebot/data/raw/
+tradebot/data/processed/
+tradebot/data/cache/
+
+# Placeholder data dirs
+tradebot/{data/

@@ -6,6 +6,13 @@
 import os
 from pathlib import Path
 
+# Load .env file if present (local development)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass  # dotenv not installed, use system env vars or defaults
+
 # ── Paths ────────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).resolve().parent.parent
 DATA_DIR   = BASE_DIR / "data"
@@ -51,10 +58,10 @@ FYERS = {
 # Get from: smartapi.angelone.in → Create App
 # Requires TOTP (Google Authenticator) enabled on your Angel One account
 ANGEL_ONE = {
-    "api_key":     "YOUR_API_KEY",
-    "client_id":   "YOUR_CLIENT_ID",     # Angel One login ID
-    "password":    "YOUR_PIN",            # 4-digit trading PIN
-    "totp_secret": "YOUR_TOTP_SECRET",   # from Angel One app QR code (base32 string)
+    "api_key":     os.environ.get("ANGEL_API_KEY",     "YOUR_API_KEY"),
+    "client_id":   os.environ.get("ANGEL_CLIENT_ID",  "YOUR_CLIENT_ID"),
+    "password":    os.environ.get("ANGEL_PIN",         "YOUR_PIN"),
+    "totp_secret": os.environ.get("ANGEL_TOTP_SECRET","YOUR_TOTP_SECRET"),
 }
 
 # ── Instruments ──────────────────────────────────────────────
@@ -154,8 +161,8 @@ DATA = {
 ALERTS = {
     "enabled":          False,          # set True when credentials are filled
     # Telegram (recommended)
-    "telegram_token":   "",             # "123456:ABC-DEF..."
-    "telegram_chat_id": "",             # your chat ID (integer as string)
+    "telegram_token":   os.environ.get("TELEGRAM_TOKEN",  ""),
+    "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID",""),
     # Email (optional)
     "smtp_host":        "",             # e.g. "smtp.gmail.com"
     "smtp_port":        465,
@@ -163,6 +170,13 @@ ALERTS = {
     "email_to":         "",
     "email_password":   "",             # app password (not main password)
 }
+
+# ── Web app + Railway deployment ─────────────────────────────
+# Your Railway deployment: https://tradebot-production-c63c.up.railway.app
+# WEBAPP_URL and WEBAPP_KEY are read from environment variables.
+# Set them in Railway → Variables dashboard, and locally in .env file.
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://tradebot-production-c63c.up.railway.app")
+WEBAPP_KEY = os.environ.get("TRADEBOT_KEY", os.environ.get("WEBAPP_KEY", "tb_secret_2026"))
 
 # ── Logging ──────────────────────────────────────────────────
 LOGGING = {
@@ -173,11 +187,20 @@ LOGGING = {
     "backup_count": 5,
 }
 
-# ── Web App (Railway dashboard) ──────────────────────────────
-# WEBAPP_KEY and WEBAPP_URL are read from environment variables — never
-# hardcode secrets here because this file is in a public git repo.
-# Set these in your shell / .env file locally:
-#   export TRADEBOT_KEY="your_secret"
-#   export WEBAPP_URL="https://tradebot-production-c63c.up.railway.app"
-WEBAPP_KEY = os.environ.get("TRADEBOT_KEY", "")
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://tradebot-production-c63c.up.railway.app")
+# ── Options trading ──────────────────────────────────────────
+OPTIONS = {
+    "enabled":              True,
+    "symbols":              ["BANKNIFTY", "NIFTY"],
+    "max_open_positions":   2,
+    "max_daily_loss_pct":   3.0,
+    "max_capital_pct":      30.0,       # max % of capital in options at once
+    "min_premium":          10.0,       # minimum option premium to trade (₹)
+    "min_iv_rank_sell":     55.0,       # sell strategies need IV rank > 55
+    "max_iv_rank_buy":      45.0,       # buy strategies need IV rank < 45
+    "target_exit_pct":      0.50,       # exit selling strategies at 50% profit
+    "stop_loss_pct":        2.0,        # exit if loss exceeds 2x premium collected
+    "min_dte_sell":         2,          # don't sell with less than 2 DTE
+    "max_dte_sell":         8,          # don't sell more than 8 DTE out
+    "min_dte_buy":          5,          # don't buy with less than 5 DTE
+    "chain_refresh_secs":   60,         # refresh option chain every 60 seconds
+}

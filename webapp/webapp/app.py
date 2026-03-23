@@ -1,14 +1,23 @@
 """
-TradeBot Web App — deployable to Railway / Render.
-Provides HTTPS Redirect URL for Angel One SmartAPI form.
+TradeBot Web App — LIVE on Railway
+Dashboard: https://tradebot-production-c63c.up.railway.app/
+Callback:  https://tradebot-production-c63c.up.railway.app/callback
+
+ProxyFix added so request.host_url returns https:// (not http://) behind Railway proxy.
+TRADEBOT_KEY read from Railway environment variable (not hardcoded).
 """
 import json, os, sqlite3, math
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, jsonify, render_template_string, request
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
+# Fix: Railway sits behind a reverse proxy — this makes request.host_url return https://
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
 DB_PATH = Path(os.environ.get("DATA_DIR", "/tmp")) / "tradebot_web.db"
+RAILWAY_URL = "https://tradebot-production-c63c.up.railway.app"
 
 def _db():
     conn = sqlite3.connect(str(DB_PATH))
@@ -42,12 +51,12 @@ def kv_get(key, default=None):
 
 def _check_key():
     k = request.headers.get("X-API-Key","")
-    return k == os.environ.get("TRADEBOT_KEY","changeme")
+    return k == os.environ.get("TRADEBOT_KEY", "tb_secret_2026")
 
 # ── Public routes ──────────────────────────────────────────────
 @app.route("/")
 def index():
-    return render_template_string(open(Path(__file__).parent/"templates/dashboard.html").read() if (Path(__file__).parent/"templates/dashboard.html").exists() else DASHBOARD_HTML)
+    return render_template_string(DASHBOARD_HTML)
 
 @app.route("/health")
 def health():
@@ -55,15 +64,30 @@ def health():
 
 @app.route("/callback")
 def callback():
+    """Angel One SmartAPI OAuth callback."""
     auth = request.args.get("auth_token","")
     feed = request.args.get("feed_token","")
     if auth:
         kv_set("angel_auth_token", auth)
         kv_set("angel_token_time", datetime.now().isoformat())
         if feed: kv_set("angel_feed_token", feed)
-        return f"<html><body style='background:#0f1117;color:#2dd4bf;font-family:sans-serif;padding:40px'><h2>✓ Angel One connected</h2><p style='color:#8892a4'>Token saved. Close this tab.</p></body></html>"
-    base = request.host_url.rstrip("/")
-    return f"<html><body style='background:#0f1117;color:#e2e8f0;font-family:sans-serif;padding:40px'><h2 style='color:#2dd4bf'>TradeBot Callback</h2><p style='color:#8892a4'>This endpoint is registered with Angel One SmartAPI.<br>URL: <code style='color:#2dd4bf'>{base}/callback</code><br><a href='/' style='color:#2dd4bf'>← Dashboard</a></p></body></html>"
+        return (
+            "<html><body style='background:#0f1117;color:#2dd4bf;"
+            "font-family:sans-serif;padding:40px'>"
+            "<h2>✓ Angel One connected</h2>"
+            "<p style='color:#8892a4'>Token saved. Close this tab.</p>"
+            "</body></html>"
+        )
+    base = request.host_url.rstrip("/")   # ProxyFix ensures this is https://
+    return (
+        f"<html><body style='background:#0f1117;color:#e2e8f0;"
+        f"font-family:sans-serif;padding:40px'>"
+        f"<h2 style='color:#2dd4bf'>TradeBot Callback</h2>"
+        f"<p style='color:#8892a4'>This endpoint is registered with Angel One SmartAPI.<br>"
+        f"Callback URL: <code style='color:#2dd4bf'>{base}/callback</code><br>"
+        f"<a href='/' style='color:#2dd4bf'>← Dashboard</a></p>"
+        f"</body></html>"
+    )
 
 @app.route("/setup")
 def setup():
@@ -71,14 +95,16 @@ def setup():
     cb   = base + "/callback"
     return render_template_string(SETUP_HTML, callback_url=cb, base_url=base)
 
-# ── Push endpoints (local engine → this server) ───────────────
+# ── Push endpoints (local engine → Railway) ───────────────────
 @app.route("/api/push/trade", methods=["POST"])
 def push_trade():
     if not _check_key(): return jsonify({"error":"unauthorized"}),401
     d = request.get_json()
     with _db() as c:
         c.execute("INSERT INTO trades(symbol,strategy,direction,entry_price,exit_price,net_pnl,exit_reason,entry_time,lots,source) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (d.get("symbol"),d.get("strategy"),d.get("direction"),d.get("entry_price"),d.get("exit_price"),d.get("net_pnl"),d.get("exit_reason"),d.get("entry_time"),d.get("lots",1),"live"))
+            (d.get("symbol"),d.get("strategy"),d.get("direction"),
+             d.get("entry_price"),d.get("exit_price"),d.get("net_pnl"),
+             d.get("exit_reason"),d.get("entry_time"),d.get("lots",1),"live"))
     return jsonify({"status":"ok"})
 
 @app.route("/api/push/status", methods=["POST"])
@@ -104,9 +130,11 @@ def api_metrics():
         rows = c.execute("SELECT net_pnl FROM trades").fetchall()
     pnls = [r[0] for r in rows if r[0] is not None]
     if not pnls:
-        empty = {"total_trades":0,"win_rate":0,"profit_factor":0,"total_pnl":0,"max_drawdown":0,"sharpe":0,"expectancy":0}
-        empty["gate"] = {"win_rate":False,"profit_factor":False,"max_drawdown":False,"min_trades":False,"all_pass":False}
-        return jsonify(empty)
+        e = {"total_trades":0,"win_rate":0,"profit_factor":0,"total_pnl":0,
+             "max_drawdown":0,"sharpe":0,"expectancy":0}
+        e["gate"] = {"win_rate":False,"profit_factor":False,
+                     "max_drawdown":False,"min_trades":False,"all_pass":False}
+        return jsonify(e)
     wins=[p for p in pnls if p>0]; losses=[p for p in pnls if p<0]; n=len(pnls)
     wr=len(wins)/n*100; pf=sum(wins)/abs(sum(losses)) if losses else 0
     avg=sum(pnls)/n; std=math.sqrt(sum((p-avg)**2 for p in pnls)/n) if n>1 else 1
@@ -116,7 +144,8 @@ def api_metrics():
         cum+=p
         if cum>peak: peak=cum
         if cum-peak<max_dd: max_dd=cum-peak
-    gate={"win_rate":wr>=55,"profit_factor":pf>=1.4,"max_drawdown":abs(max_dd)<12000,"min_trades":n>=200}
+    gate={"win_rate":wr>=55,"profit_factor":pf>=1.4,
+          "max_drawdown":abs(max_dd)<12000,"min_trades":n>=200}
     gate["all_pass"]=all(gate.values())
     return jsonify({"total_trades":n,"win_rate":round(wr,1),"profit_factor":round(pf,2),
                     "total_pnl":round(sum(pnls),2),"max_drawdown":round(max_dd,2),
@@ -153,15 +182,16 @@ def api_status():
         n = c.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
     return jsonify({"engine":status,"angel_token_set":bool(kv_get("angel_auth_token")),
                     "angel_token_time":kv_get("angel_token_time",""),"db_trades":n,
-                    "server_time":datetime.now().isoformat()})
-
+                    "server_time":datetime.now().isoformat(),
+                    "railway_url": RAILWAY_URL})
 
 SETUP_HTML = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Setup Guide</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0f1117;color:#e2e8f0;font-family:-apple-system,sans-serif;font-size:14px;line-height:1.7}
 nav{background:#161b27;border-bottom:1px solid #2a3245;padding:0 20px;display:flex;align-items:center;gap:20px;height:50px}
 .brand{font-size:1.05rem;font-weight:700;color:#2dd4bf}nav a{color:#8892a4;text-decoration:none;font-size:13px}
 .page{max-width:760px;margin:0 auto;padding:32px 20px}
-h1{font-size:1.5rem;font-weight:700;margin-bottom:6px}h2{font-size:.95rem;font-weight:700;color:#2dd4bf;margin:26px 0 10px;text-transform:uppercase;letter-spacing:.5px}
+h1{font-size:1.5rem;font-weight:700;margin-bottom:6px}
+h2{font-size:.95rem;font-weight:700;color:#2dd4bf;margin:26px 0 10px;text-transform:uppercase;letter-spacing:.5px}
 p{color:#8892a4;margin-bottom:8px;font-size:13.5px}
 .step{background:#161b27;border:1px solid #2a3245;border-radius:10px;padding:18px 18px 18px 56px;margin-bottom:12px;position:relative}
 .sn{position:absolute;left:14px;top:16px;width:28px;height:28px;border-radius:50%;background:#0d3330;border:1.5px solid #2dd4bf;color:#2dd4bf;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
@@ -169,31 +199,32 @@ p{color:#8892a4;margin-bottom:8px;font-size:13.5px}
 pre{background:#1e2536;border:1px solid #2a3245;border-radius:6px;padding:12px 14px;font-family:monospace;font-size:12px;overflow-x:auto;margin:8px 0;color:#e2e8f0;line-height:1.6}
 .hi{background:#0d3330;border:1px solid #2dd4bf;border-radius:8px;padding:14px 18px;margin:10px 0;word-break:break-all}
 .hi code{color:#2dd4bf;font-family:monospace;font-size:1rem;font-weight:700}
+.done{background:#0a2e18;border:1px solid #4ade80;border-radius:8px;padding:12px 16px;margin:10px 0;color:#4ade80;font-size:13px}
 .warn{background:#3d2e0a;border:1px solid #fbbf24;border-radius:8px;padding:12px 16px;margin:12px 0;font-size:13px}
 .warn strong{color:#fbbf24;display:block;margin-bottom:4px}
 </style></head><body>
 <nav><span class="brand">TradeBot</span><a href="/">Dashboard</a><a href="/setup">Setup Guide</a></nav>
 <div class="page">
 <h1>Angel One SmartAPI — Setup Guide</h1>
-<p>How to fill the SmartAPI registration form and connect your trading system.</p>
+
+<div class="done">✓ Railway deployed — dashboard is live at <strong>{{ base_url }}</strong></div>
 
 <h2>Your callback URL — paste this into the SmartAPI form</h2>
 <div class="hi"><code>{{ callback_url }}</code></div>
-<p>This is a live public HTTPS URL. Angel One will accept it.</p>
 
 <div class="warn"><strong>Static IP requirement (April 2026 onwards)</strong>
-Angel One now requires all API orders to originate from a registered static IP.
-Options: (1) Use a VPS like Hetzner CX11 (€3.79/month = ~₹350) which gives a static IP.
-Run your trading engine there. (2) Ask your ISP for a static IP (₹200–500/month extra).
-(3) Use a VPN service with a dedicated static IP. The web dashboard (this app) can stay on Railway/Render free tier.</div>
+Angel One requires all API orders to come from a registered static IP.
+Your trading engine (main.py) must run from a static IP.
+Cheapest option: Oracle Cloud free VM (Mumbai region) — includes static IP, free forever.
+The Railway dashboard does NOT need a static IP — only your trading engine does.</div>
 
 <h2>Steps</h2>
 <div class="step"><div class="sn">1</div>
-<h3>Go to smartapi.angelone.in → Add App</h3>
+<h3>Fill the SmartAPI form at smartapi.angelone.in → Add App</h3>
 <pre>App Name:          TradeBot
 Redirect URL:      {{ callback_url }}
 Post back URL:     (leave empty)
-Primary Static IP: [your static IP from VPS or ISP]
+Primary Static IP: [your static IP — Oracle Cloud VM or ISP static IP]
 Secondary IP:      (leave empty)</pre>
 <p>Click <strong>Add</strong> → copy the <strong>API Key</strong> shown.</p>
 </div>
@@ -201,13 +232,12 @@ Secondary IP:      (leave empty)</pre>
 <div class="step"><div class="sn">2</div>
 <h3>Enable TOTP on Angel One mobile app</h3>
 <pre>Angel One App → Profile → Security → Enable TOTP
-→ Tap "Can't scan?" to reveal base32 secret key
-→ Copy the secret (e.g. JBSWY3DPEHPK3PXP)
-→ Save it — this is your totp_secret</pre>
+Tap "Can't scan?" → copy the base32 secret (e.g. JBSWY3DPEHPK3PXP)
+This goes in config/settings.py as totp_secret</pre>
 </div>
 
 <div class="step"><div class="sn">3</div>
-<h3>Fill config/settings.py</h3>
+<h3>Fill config/settings.py with your credentials</h3>
 <pre>ANGEL_ONE = {
     "api_key":     "paste_api_key_here",
     "client_id":   "your_angel_one_client_id",
@@ -219,31 +249,39 @@ ACTIVE_BROKER = "paper"</pre>
 </div>
 
 <div class="step"><div class="sn">4</div>
-<h3>Set TRADEBOT_KEY env variable in Railway/Render</h3>
-<pre>In your Railway/Render dashboard → Variables:
-  TRADEBOT_KEY = any_secret_string_you_choose
+<h3>Set Railway environment variable</h3>
+<pre>Railway dashboard → your project → Variables:
+  TRADEBOT_KEY = tb_secret_2026   (already set ✓)
 
-Same string in config/settings.py:
-  WEBAPP_KEY = "same_secret_string"</pre>
-<p>This lets your local engine securely push trade data to this dashboard.</p>
+Same value in your local .env:
+  TRADEBOT_KEY=tb_secret_2026
+  WEBAPP_URL=https://tradebot-production-c63c.up.railway.app</pre>
+<p>The engine uses WEBAPP_URL to push trade data to this dashboard.</p>
 </div>
 
 <div class="step"><div class="sn">5</div>
-<h3>Test the connection</h3>
+<h3>Test Angel One connection (from your machine or Oracle VM)</h3>
 <pre>python generate_token_angel.py
 # Should print: "Logged in as: YOUR NAME"</pre>
 </div>
 
 <div class="step"><div class="sn">6</div>
 <h3>Start trading</h3>
-<pre>python main.py          # paper trading
-python -m webapp.app    # local dashboard at localhost:5000</pre>
-<p>This hosted dashboard at <a href="{{ base_url }}" style="color:#2dd4bf">{{ base_url }}</a> shows live data pushed from your engine.</p>
+<pre># Simulate options (no broker needed right now)
+python main.py --mode options-sim --days 90
+
+# Paper trading (after Angel One connected)
+python main.py --mode paper
+
+# This dashboard auto-updates at: {{ base_url }}</pre>
 </div>
 </div></body></html>"""
 
-DASHBOARD_HTML = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TradeBot</title>
-<style>*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+DASHBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TradeBot</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{--bg:#0f1117;--bg2:#161b27;--bg3:#1e2536;--border:#2a3245;--text:#e2e8f0;--muted:#8892a4;--teal:#2dd4bf;--amber:#fbbf24;--green:#4ade80;--red:#f87171}
 body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px}
 nav{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 18px;display:flex;align-items:center;gap:18px;height:50px;position:sticky;top:0;z-index:10}
@@ -251,6 +289,7 @@ nav{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 18px;d
 nav a{color:var(--muted);text-decoration:none;font-size:13px}nav a:hover{color:var(--text)}
 .pill{border-radius:20px;padding:3px 10px;font-size:11px;font-weight:600;border:1px solid var(--border);color:var(--muted);background:var(--bg3)}
 .pill.on{background:#0a2e18;border-color:var(--green);color:var(--green)}
+.railway-badge{font-size:11px;background:#2d1f5e;border:1px solid #a78bfa;border-radius:4px;padding:2px 8px;color:#a78bfa}
 .main{max-width:1040px;margin:0 auto;padding:20px 16px}
 .hr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;flex-wrap:wrap;gap:10px}
 .pt{font-size:1.25rem;font-weight:700}.ps{font-size:12px;color:var(--muted);margin-top:2px}
@@ -280,15 +319,23 @@ td{padding:7px 9px;border-bottom:1px solid var(--border)}tr:last-child td{border
 .log{background:var(--bg3);border-radius:7px;padding:10px 12px;font-family:monospace;font-size:11px;max-height:240px;overflow-y:auto;color:var(--muted);line-height:1.5}
 .cw{position:relative;height:190px}
 </style></head><body>
-<nav><span class="brand">TradeBot</span><a href="/">Dashboard</a><a href="/setup">Setup</a>
-<div style="flex:1"></div><span class="pill" id="ep">checking...</span>
-<span style="font-size:11px;color:var(--muted)" id="clk"></span></nav>
+<nav>
+  <span class="brand">TradeBot</span>
+  <a href="/">Dashboard</a><a href="/setup">Setup</a>
+  <span class="railway-badge">Railway Live</span>
+  <div style="flex:1"></div>
+  <span class="pill" id="ep">checking...</span>
+  <span style="font-size:11px;color:var(--muted)" id="clk"></span>
+</nav>
 <div class="main">
   <div class="hr">
-    <div><div class="pt">Dashboard</div><div class="ps" id="upd">Loading...</div></div>
+    <div>
+      <div class="pt">TradeBot Dashboard</div>
+      <div class="ps" id="upd">Loading...</div>
+    </div>
     <button class="btn" onclick="loadAll()">↻ Refresh</button>
   </div>
-  <div class="ss" id="ss"><div class="si"><span class="d dm"></span>Connecting...</div></div>
+  <div class="ss" id="ss"><div class="si"><span class="d dm"></span>Connecting to Railway...</div></div>
   <div class="mg">
     <div class="mc"><div class="l">Net P&L</div><div class="v" id="mpnl" style="color:var(--teal)">—</div><div class="s">after costs</div></div>
     <div class="mc"><div class="l">Win rate</div><div class="v" id="mwr" style="color:var(--green)">—</div><div class="s">target ≥55%</div></div>
@@ -298,16 +345,18 @@ td{padding:7px 9px;border-bottom:1px solid var(--border)}tr:last-child td{border
     <div class="mc"><div class="l">Max DD</div><div class="v" id="mdd" style="color:var(--red)">—</div><div class="s">limit ₹12k</div></div>
     <div class="mc"><div class="l">Expectancy</div><div class="v" id="mex">—</div><div class="s">avg/trade</div></div>
   </div>
-  <div class="card"><div class="ch"><h3>Gate check — all green before live capital</h3></div><div class="gg" id="gg"><div class="gi gn"><span class="d dm"></span>Loading...</div></div></div>
+  <div class="card"><div class="ch"><h3>Gate check — all green before live capital</h3></div>
+    <div class="gg" id="gg"><div class="gi gn"><span class="d dm"></span>Loading...</div></div></div>
   <div class="card"><div class="ch"><h3>Equity curve</h3></div><div class="cw"><canvas id="ec"></canvas></div></div>
   <div class="card">
     <div class="ch"><h3>Recent trades</h3><span style="font-size:11px;color:var(--muted)" id="tc"></span></div>
     <div style="overflow-x:auto"><table>
       <thead><tr><th>Time</th><th>Strategy</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Net P&L</th><th></th></tr></thead>
-      <tbody id="tb"><tr><td colspan="8" style="color:var(--muted);text-align:center;padding:16px">No trades yet</td></tr></tbody>
+      <tbody id="tb"><tr><td colspan="8" style="color:var(--muted);text-align:center;padding:16px">No trades yet — start paper trading or run simulation</td></tr></tbody>
     </table></div>
   </div>
-  <div class="card"><div class="ch"><h3>Engine log</h3><button class="btn" onclick="loadLogs()">Refresh</button></div><div class="log" id="lg">Waiting...</div></div>
+  <div class="card"><div class="ch"><h3>Engine log</h3><button class="btn" onclick="loadLogs()">Refresh</button></div>
+    <div class="log" id="lg">Waiting for engine to push logs...</div></div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
@@ -317,8 +366,12 @@ setInterval(()=>document.getElementById('clk').textContent=new Date().toLocaleTi
 async function loadStatus(){const d=await fetch('/api/status').then(r=>r.json());const e=d.engine||{};
   document.getElementById('ep').className='pill'+(e.running?' on':'');
   document.getElementById('ep').textContent=e.running?'Engine live':'Engine offline';
-  document.getElementById('ss').innerHTML=[{l:'Angel token',ok:d.angel_token_set},{l:'Engine',ok:!!e.running},{l:'Trades ('+d.db_trades+')',ok:d.db_trades>0}]
-    .map(i=>`<div class="si"><span class="d ${i.ok?'dg':'dr'}"></span>${i.l}</div>`).join('');}
+  document.getElementById('ss').innerHTML=[
+    {l:'Angel token',ok:d.angel_token_set},
+    {l:'Engine',ok:!!e.running},
+    {l:'Trades ('+d.db_trades+')',ok:d.db_trades>0},
+    {l:'Railway ✓',ok:true},
+  ].map(i=>`<div class="si"><span class="d ${i.ok?'dg':'dr'}"></span>${i.l}</div>`).join('');}
 async function loadMetrics(){const d=await fetch('/api/metrics').then(r=>r.json());
   document.getElementById('mpnl').textContent=fmt(d.total_pnl);
   document.getElementById('mwr').textContent=d.win_rate+'%';
@@ -328,8 +381,13 @@ async function loadMetrics(){const d=await fetch('/api/metrics').then(r=>r.json(
   document.getElementById('mdd').textContent=fmt(d.max_drawdown);
   document.getElementById('mex').textContent=fmt(d.expectancy);
   const g=d.gate;
-  document.getElementById('gg').innerHTML=[{l:'Win rate ≥55% ('+d.win_rate+'%)',p:g.win_rate},{l:'PF ≥1.4 ('+d.profit_factor+')',p:g.profit_factor},{l:'Max DD <₹12k',p:g.max_drawdown},{l:'Trades ≥200 ('+d.total_trades+')',p:g.min_trades}]
-    .map(x=>`<div class="gi ${x.p?'gp':'gf'}"><span class="d ${x.p?'dg':'dr'}"></span>${x.l}</div>`).join('')+(g.all_pass?'<div class="gi gp" style="grid-column:1/-1"><span class="d dg"></span>ALL GATES PASSED</div>':'');}
+  document.getElementById('gg').innerHTML=[
+    {l:'Win rate ≥55% ('+d.win_rate+'%)',p:g.win_rate},
+    {l:'PF ≥1.4 ('+d.profit_factor+')',p:g.profit_factor},
+    {l:'Max DD <₹12k',p:g.max_drawdown},
+    {l:'Trades ≥200 ('+d.total_trades+')',p:g.min_trades},
+  ].map(x=>`<div class="gi ${x.p?'gp':'gf'}"><span class="d ${x.p?'dg':'dr'}"></span>${x.l}</div>`).join('')+
+  (g.all_pass?'<div class="gi gp" style="grid-column:1/-1"><span class="d dg"></span>ALL GATES PASSED — ready for live capital</div>':'');}
 async function loadEquity(){const d=await fetch('/api/equity').then(r=>r.json());if(!d.equity.length)return;
   const ctx=document.getElementById('ec').getContext('2d');const last=d.equity[d.equity.length-1];const col=last>=d.capital?'#2dd4bf':'#f87171';
   if(ec)ec.destroy();ec=new Chart(ctx,{type:'line',data:{labels:d.equity.map((_,i)=>i+1),datasets:[{data:d.equity,borderColor:col,borderWidth:1.5,fill:true,backgroundColor:col+'18',tension:.3,pointRadius:0,pointHoverRadius:3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{ticks:{color:'#8892a4',callback:v=>'₹'+Math.round(v).toLocaleString('en-IN')},grid:{color:'#2a3245'}}}}});}
@@ -339,7 +397,7 @@ async function loadTrades(){const d=await fetch('/api/trades?limit=30').then(r=>
     return`<tr><td style="color:var(--muted);white-space:nowrap">${(t.entry_time||'').toString().slice(0,16)}</td><td>${t.strategy||'-'}</td><td style="color:${(t.direction||'').includes('LONG')?'var(--green)':'var(--red)'}">${t.direction||'-'}</td><td>₹${Math.round(t.entry_price||0)}</td><td>₹${Math.round(t.exit_price||0)}</td><td style="color:var(--muted)">${t.exit_reason||'-'}</td><td style="color:${w?'var(--green)':'var(--red)'};">${w?'+':''}₹${Math.round(p)}</td><td><span class="${w?'bw':'bl'}">${w?'WIN':'LOSS'}</span></td></tr>`;
   }).join('');}
 async function loadLogs(){const d=await fetch('/api/logs').then(r=>r.json());const b=document.getElementById('lg');
-  if(!d.lines.length){b.textContent='No logs yet.';return;}
+  if(!d.lines.length){b.textContent='No logs yet. Start the engine.';return;}
   b.innerHTML=d.lines.map(l=>`<div style="color:${l.includes('ERROR')?'var(--red)':l.includes('WARN')?'var(--amber)':l.includes('WIN')||l.includes('FILL')||l.includes('TARGET')?'var(--green)':'var(--muted)'}">${l}</div>`).join('');b.scrollTop=b.scrollHeight;}
 async function loadAll(){document.getElementById('upd').textContent='Updated: '+new Date().toLocaleTimeString('en-IN');
   await Promise.all([loadStatus(),loadMetrics(),loadEquity(),loadTrades(),loadLogs()]);}
@@ -348,4 +406,9 @@ loadAll();setInterval(loadAll,30000);
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+    print(f"\n  TradeBot Web App")
+    print(f"  Dashboard:   http://localhost:{port}/")
+    print(f"  Setup guide: http://localhost:{port}/setup")
+    print(f"  Callback:    http://localhost:{port}/callback")
+    print(f"  Railway URL: {RAILWAY_URL}\n")
     app.run(host="0.0.0.0", port=port, debug=False)

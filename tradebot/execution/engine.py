@@ -34,6 +34,7 @@ from risk.manager import RiskManager
 from risk.cost_model import CostModel
 from ai.classifier import MultiStrategyClassifier
 from alerts.notifier import Notifier
+from utils.railway_push import get_pusher
 from utils.logger import setup_logging
 from config.settings import RISK, SESSION, PRIMARY_TF, INSTRUMENTS, ACTIVE_BROKER
 
@@ -72,6 +73,7 @@ class ExecutionEngine:
         self.risk       = RiskManager(capital)
         self.cost       = CostModel(self.broker_name if self.broker_name != "paper" else "zerodha")
         self.notifier   = Notifier()
+        self.pusher     = get_pusher()
 
         # AI layer (Engine B)
         strategy_names = [s.name for s in self.strategies]
@@ -198,6 +200,12 @@ class ExecutionEngine:
         # Update paper broker price if applicable
         if hasattr(self.broker, "update_price"):
             self.broker.update_price(self.symbol, float(candle["close"]))
+
+        # Push live status to Railway every bar
+        try:
+            self.pusher.push_status(self.risk.status())
+        except Exception:
+            pass
 
         logger.info(
             f"[{ts.strftime('%H:%M')}] "
@@ -399,6 +407,12 @@ class ExecutionEngine:
                 path = self._log_dir / f"live_{self.symbol}_{datetime.now():%Y%m%d}.csv"
                 trades.to_csv(path, index=False)
                 logger.info(f"Trade log saved: {path}")
+                # Push all trades to Railway
+                for _, row in trades.iterrows():
+                    try:
+                        self.pusher.push_trade(row.to_dict())
+                    except Exception:
+                        pass
 
     # ── Time helpers ──────────────────────────────────────────
 
