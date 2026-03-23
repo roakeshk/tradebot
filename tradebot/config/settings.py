@@ -7,9 +7,13 @@ import os
 from pathlib import Path
 
 # Load .env file if present (local development)
+# Checks tradebot/.env first, then project root .env
 try:
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent.parent / ".env")
+    _tradebot_env = Path(__file__).parent.parent / ".env"
+    _root_env = Path(__file__).parent.parent.parent / ".env"
+    load_dotenv(_tradebot_env)
+    load_dotenv(_root_env)  # root values won't overwrite tradebot/.env values
 except ImportError:
     pass  # dotenv not installed, use system env vars or defaults
 
