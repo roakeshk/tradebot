@@ -105,7 +105,7 @@ def push_trade():
         c.execute("INSERT INTO trades(symbol,strategy,direction,entry_price,exit_price,net_pnl,exit_reason,entry_time,lots,source) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (d.get("symbol"),d.get("strategy"),d.get("direction"),
              d.get("entry_price"),d.get("exit_price"),d.get("net_pnl"),
-             d.get("exit_reason"),d.get("entry_time"),d.get("lots",1),"live"))
+             d.get("exit_reason"),d.get("entry_time"),d.get("lots",1),d.get("source","live")))
     return jsonify({"status":"ok"})
 
 @app.route("/api/push/status", methods=["POST"])
@@ -395,7 +395,8 @@ async function loadEquity(){const d=await fetch('/api/equity').then(r=>r.json())
 async function loadTrades(){const d=await fetch('/api/trades?limit=30').then(r=>r.json());
   document.getElementById('tc').textContent=d.total+' total';if(!d.trades.length)return;
   document.getElementById('tb').innerHTML=d.trades.map(t=>{const p=parseFloat(t.net_pnl||0),w=p>0;
-    return`<tr><td style="color:var(--muted);white-space:nowrap">${(t.entry_time||'').toString().slice(0,16)}</td><td>${t.strategy||'-'}</td><td style="color:${(t.direction||'').includes('LONG')?'var(--green)':'var(--red)'}">${t.direction||'-'}</td><td>₹${Math.round(t.entry_price||0)}</td><td>₹${Math.round(t.exit_price||0)}</td><td style="color:var(--muted)">${t.exit_reason||'-'}</td><td style="color:${w?'var(--green)':'var(--red)'};">${w?'+':''}₹${Math.round(p)}</td><td><span class="${w?'bw':'bl'}">${w?'WIN':'LOSS'}</span></td></tr>`;
+    const dc=(t.direction||'').includes('LONG')?'var(--green)':(t.direction||'').includes('OPTIONS')?'#2dd4bf':'var(--red)';
+    return`<tr><td style="color:var(--muted);white-space:nowrap">${(t.entry_time||'').toString().slice(0,16)}</td><td>${t.strategy||'-'}</td><td style="color:${dc}">${t.direction||'-'}</td><td>₹${Math.round(t.entry_price||0)}</td><td>₹${Math.round(t.exit_price||0)}</td><td style="color:var(--muted)">${t.exit_reason||'-'}</td><td style="color:${w?'var(--green)':'var(--red)'};">${w?'+':''}₹${Math.round(p)}</td><td><span class="${w?'bw':'bl'}">${w?'WIN':'LOSS'}</span></td></tr>`;
   }).join('');}
 async function loadLogs(){const d=await fetch('/api/logs').then(r=>r.json());const b=document.getElementById('lg');
   if(!d.lines.length){b.textContent='No logs yet. Start the engine.';return;}

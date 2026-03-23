@@ -50,7 +50,7 @@ class RailwayPusher:
             self.key = WEBAPP_KEY
         except Exception:
             self.url = "https://tradebot-production-c63c.up.railway.app"
-            self.key = "tb_secret_2026"
+            self.key = ""
 
         self._enabled = bool(self.url and self.key)
         if self._enabled:
@@ -113,6 +113,7 @@ class RailwayPusher:
             "exit_reason": getattr(trade, "exit_reason", ""),
             "entry_time":  str(getattr(trade, "entry_time", datetime.now().isoformat())),
             "lots":        getattr(trade, "lots", 1),
+            "source":      "options-paper",
         })
 
 

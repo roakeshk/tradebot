@@ -180,7 +180,7 @@ ALERTS = {
 # WEBAPP_URL and WEBAPP_KEY are read from environment variables.
 # Set them in Railway → Variables dashboard, and locally in .env file.
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://tradebot-production-c63c.up.railway.app")
-WEBAPP_KEY = os.environ.get("TRADEBOT_KEY", os.environ.get("WEBAPP_KEY", "tb_secret_2026"))
+WEBAPP_KEY = os.environ.get("TRADEBOT_KEY", os.environ.get("WEBAPP_KEY", ""))
 
 # ── Logging ──────────────────────────────────────────────────
 LOGGING = {
