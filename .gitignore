@@ -45,6 +45,3 @@ Thumbs.db
 tradebot/data/raw/
 tradebot/data/processed/
 tradebot/data/cache/
-
-# Placeholder data dirs
-tradebot/{data/
