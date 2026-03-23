@@ -51,7 +51,8 @@ def kv_get(key, default=None):
 
 def _check_key():
     k = request.headers.get("X-API-Key","")
-    return k == os.environ.get("TRADEBOT_KEY", "tb_secret_2026")
+    expected = os.environ.get("TRADEBOT_KEY", "")
+    return bool(expected) and k == expected
 
 # ── Public routes ──────────────────────────────────────────────
 @app.route("/")
@@ -251,10 +252,10 @@ ACTIVE_BROKER = "paper"</pre>
 <div class="step"><div class="sn">4</div>
 <h3>Set Railway environment variable</h3>
 <pre>Railway dashboard → your project → Variables:
-  TRADEBOT_KEY = tb_secret_2026   (already set ✓)
+  TRADEBOT_KEY = your_secret_key_here
 
 Same value in your local .env:
-  TRADEBOT_KEY=tb_secret_2026
+  TRADEBOT_KEY=your_secret_key_here
   WEBAPP_URL=https://tradebot-production-c63c.up.railway.app</pre>
 <p>The engine uses WEBAPP_URL to push trade data to this dashboard.</p>
 </div>

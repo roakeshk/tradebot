@@ -75,3 +75,45 @@ There are no unit tests yet — validation is via walk-forward backtesting only.
 | `tradebot/main.py` | CLI entry point (argparse, 7 modes) |
 | `webapp/webapp/app.py` | Flask app with ProxyFix for Railway HTTPS |
 | `.env.example` | Environment variable template |
+
+## Security
+
+### Secrets Management — CRITICAL
+
+- **All secrets MUST live in `.env` (git-ignored) or environment variables.** Never write real API keys, passwords, TOTP secrets, or tokens into any committed file.
+- `config/settings.py` reads secrets via `os.environ.get()` only. Placeholder defaults like `"YOUR_API_KEY"` are acceptable; real values are not.
+- `.env.example` shows structure with dummy values — never populate it with real credentials.
+
+### Exposed Key Protocol — HARD STOP
+
+If you detect **any real secret** (API key, password, TOTP secret, token, or `TRADEBOT_KEY`) in a file that is or could be committed to git:
+
+1. **STOP immediately.** Do not proceed with any other task.
+2. **Alert the user** with the exact file, line, and key type exposed.
+3. **Instruct the user to:**
+   - Revoke / regenerate the exposed key at the provider (Angel One, Fyers, Zerodha, Telegram, Railway, etc.)
+   - Remove the secret from the file and replace with a placeholder or `os.environ.get()` call
+   - Run `git rm --cached <file>` if it was already staged/committed, then force-push
+4. **Do not continue** with any code generation, deployment, or commit until the user confirms the key has been regenerated and the file is clean.
+
+### What Counts as a Real Secret
+
+- Angel One: `api_key`, `client_id`, `totp_secret`, `password` (PIN) — if they don't look like `YOUR_*` or `changeme`
+- Fyers: `client_id`, `secret_key` — if not placeholder
+- Zerodha: `api_key`, `api_secret` — if not placeholder
+- Telegram: `telegram_token` (format `123456:ABC-...`), `telegram_chat_id` (numeric)
+- Railway / webapp: `TRADEBOT_KEY` — if not placeholder like `changeme` or empty
+- Any string that looks like a real token, hash, or base32-encoded secret (e.g., 20+ alphanumeric chars)
+
+### Pre-Commit Checks
+
+Before every `git add` or `git commit`:
+- Scan all staged files for patterns matching real secrets (API keys, tokens, base32 strings)
+- If `.env` is accidentally staged, **block the commit** and unstage it
+- Ensure `.env` and `.env.*` (except `.env.example`) remain in `.gitignore`
+
+### Webapp Authentication
+
+- All `/api/push/*` endpoints require `X-API-Key` header matching `TRADEBOT_KEY`
+- The `_check_key()` function in `webapp/app.py` must never use a hardcoded fallback that leaks into production — always read from `os.environ.get("TRADEBOT_KEY")`
+- Railway environment variables are the source of truth for deployed secrets
