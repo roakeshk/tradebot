@@ -512,7 +512,7 @@ tr:last-child td{border-bottom:none}tr:hover td{background:#1e222d08}
 /* ── Config (injected) ── */
 const C="{{ CUR }}",L="{{ LOCALE }}",TZ="{{ JS_TZ }}",TZL="{{ TZ_LABEL }}",MK="{{ MARKET }}";
 const RC={cap:{{ RISK_CAPITAL }},mdl:{{ MAX_DAILY_LOSS_PCT }},mdd:{{ MAX_DD_PCT }},mxp:{{ MAX_POSITIONS }},mxt:{{ MAX_TRADES_DAY }},rr:{{ MIN_RR }}};
-{{ FMT_JS }}
+{{ FMT_JS|safe }}
 
 let ecChart=null,dcChart=null;
 const $=id=>document.getElementById(id);
