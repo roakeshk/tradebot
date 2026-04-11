@@ -1,13 +1,15 @@
 """
 TradeBot Relay — Railway Dashboard
 Standalone Flask app. No tradebot deps. Receives pushes from the engine,
-stores in SQLite, serves an institutional-grade live dashboard.
+stores in SQLite, serves an institutional-grade live dashboard with
+world market status and built-in simulation engine.
 
 Env vars: MARKET (US|INDIA), TRADEBOT_KEY, MAX_DD, RISK_CAPITAL, etc.
 """
-import json, os, sqlite3, math
-from datetime import datetime
+import json, os, sqlite3, math, random, time, threading
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, render_template_string, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -46,8 +48,98 @@ else:
         r"return v<0?'-'+s:s};"
     ).replace("CUR", _CUR).replace("LOCALE", _LOCALE)
 
+# JS makeFmt() factory — used when user switches market in the UI
+_FMT_FACTORY_JS = r"""function makeFmt(cur,loc){return function(v){if(v==null||isNaN(v))return cur+'0';var a=Math.abs(v),s=a>=1e6?cur+(a/1e6).toFixed(2)+'M':a>=1e3?cur+(a/1e3).toFixed(1)+'k':cur+Math.round(a).toLocaleString(loc);return v<0?'-'+s:s};}"""
+
 RAILWAY_URL = os.environ.get("WEBAPP_URL", "https://tradebot-production-c63c.up.railway.app")
 DB_PATH = Path(os.environ.get("DATA_DIR", "/tmp")) / "tradebot_web.db"
+
+# ── World Markets ─────────────────────────────────────────────
+WORLD_MARKETS = {
+    "US": {
+        "name": "NYSE / NASDAQ", "flag": "\U0001f1fa\U0001f1f8", "index": "S&P 500",
+        "currency": "$", "locale": "en-US", "tz": "America/New_York", "tz_label": "ET",
+        "open": (9, 30), "close": (16, 0), "lunch": None,
+        "instruments": [
+            {"s": "SPY", "p": 520}, {"s": "QQQ", "p": 440}, {"s": "AAPL", "p": 190},
+            {"s": "MSFT", "p": 420}, {"s": "TSLA", "p": 250}, {"s": "NVDA", "p": 130},
+            {"s": "AMZN", "p": 190}, {"s": "GOOGL", "p": 165}, {"s": "META", "p": 500},
+            {"s": "JPM", "p": 200},
+        ],
+    },
+    "UK": {
+        "name": "London SE", "flag": "\U0001f1ec\U0001f1e7", "index": "FTSE 100",
+        "currency": "\u00a3", "locale": "en-GB", "tz": "Europe/London", "tz_label": "GMT",
+        "open": (8, 0), "close": (16, 30), "lunch": None,
+        "instruments": [
+            {"s": "SHEL", "p": 2700}, {"s": "AZN", "p": 11500}, {"s": "HSBA", "p": 640},
+            {"s": "BP", "p": 480}, {"s": "RIO", "p": 5200}, {"s": "ULVR", "p": 4200},
+        ],
+    },
+    "INDIA": {
+        "name": "NSE India", "flag": "\U0001f1ee\U0001f1f3", "index": "NIFTY 50",
+        "currency": "\u20b9", "locale": "en-IN", "tz": "Asia/Kolkata", "tz_label": "IST",
+        "open": (9, 15), "close": (15, 30), "lunch": None,
+        "instruments": [
+            {"s": "RELIANCE", "p": 2500}, {"s": "TCS", "p": 3800}, {"s": "INFY", "p": 1500},
+            {"s": "HDFCBANK", "p": 1600}, {"s": "ITC", "p": 440}, {"s": "SBIN", "p": 780},
+        ],
+    },
+    "JAPAN": {
+        "name": "Tokyo SE", "flag": "\U0001f1ef\U0001f1f5", "index": "Nikkei 225",
+        "currency": "\u00a5", "locale": "ja-JP", "tz": "Asia/Tokyo", "tz_label": "JST",
+        "open": (9, 0), "close": (15, 0), "lunch": ((11, 30), (12, 30)),
+        "instruments": [
+            {"s": "7203.T", "p": 2800}, {"s": "6758.T", "p": 13000}, {"s": "9984.T", "p": 8500},
+            {"s": "6861.T", "p": 52000}, {"s": "8306.T", "p": 1400},
+        ],
+    },
+    "CHINA": {
+        "name": "Shanghai SE", "flag": "\U0001f1e8\U0001f1f3", "index": "SSE Composite",
+        "currency": "\u00a5", "locale": "zh-CN", "tz": "Asia/Shanghai", "tz_label": "CST",
+        "open": (9, 30), "close": (15, 0), "lunch": ((11, 30), (13, 0)),
+        "instruments": [
+            {"s": "600519", "p": 1700}, {"s": "601318", "p": 48}, {"s": "600036", "p": 35},
+            {"s": "601888", "p": 70}, {"s": "600276", "p": 25},
+        ],
+    },
+    "AUSTRALIA": {
+        "name": "ASX", "flag": "\U0001f1e6\U0001f1fa", "index": "ASX 200",
+        "currency": "A$", "locale": "en-AU", "tz": "Australia/Sydney", "tz_label": "AEST",
+        "open": (10, 0), "close": (16, 0), "lunch": None,
+        "instruments": [
+            {"s": "BHP", "p": 46}, {"s": "CBA", "p": 120}, {"s": "CSL", "p": 280},
+            {"s": "WBC", "p": 26}, {"s": "NAB", "p": 35},
+        ],
+    },
+}
+
+
+def _market_status(mkt_id):
+    """Return (status, local_time_str) for a market."""
+    m = WORLD_MARKETS[mkt_id]
+    tz = ZoneInfo(m["tz"])
+    now = datetime.now(tz)
+    t = now.hour * 60 + now.minute
+    o = m["open"][0] * 60 + m["open"][1]
+    c = m["close"][0] * 60 + m["close"][1]
+    lt = now.strftime("%-I:%M %p ") + m["tz_label"] if os.name != "nt" else now.strftime("%#I:%M %p ") + m["tz_label"]
+
+    # Weekend check
+    if now.weekday() >= 5:
+        return "closed", lt
+
+    # Lunch break check
+    if m["lunch"]:
+        ls = m["lunch"][0][0] * 60 + m["lunch"][0][1]
+        le = m["lunch"][1][0] * 60 + m["lunch"][1][1]
+        if ls <= t < le:
+            return "lunch", lt
+
+    if o <= t < c:
+        return "open", lt
+    return "closed", lt
+
 
 # ── Database layer ────────────────────────────────────────────
 def _db():
@@ -86,12 +178,140 @@ def _check_key():
     expected = os.environ.get("TRADEBOT_KEY", "")
     return bool(expected) and k == expected
 
+
+# ── Demo Simulator ────────────────────────────────────────────
+class DemoSimulator(threading.Thread):
+    """Background thread that generates realistic trades via GBM."""
+
+    def __init__(self, market_id="US", speed=5):
+        super().__init__(daemon=True)
+        self.market_id = market_id
+        self.speed = max(1, speed)
+        self._stop_event = threading.Event()
+        mkt = WORLD_MARKETS.get(market_id, WORLD_MARKETS["US"])
+        self.instruments = mkt["instruments"]
+        self.currency = mkt["currency"]
+        self.capital = _RISK_CAPITAL
+        self.daily_pnl = 0.0
+        self.trades_count = 0
+        self.open_positions = 0
+        self.started_at = None
+        self.strategies = ["momentum", "mean_rev", "breakout", "trend"]
+        self.exit_reasons = ["target", "stop", "trail", "signal"]
+
+    def stop(self):
+        self._stop_event.set()
+
+    @property
+    def running(self):
+        return self.is_alive() and not self._stop_event.is_set()
+
+    def run(self):
+        self.started_at = datetime.now().isoformat()
+        mu, sigma = 0.0001, 0.02
+
+        while not self._stop_event.is_set():
+            # Pick a random instrument
+            inst = random.choice(self.instruments)
+            sym = inst["s"]
+            base_price = inst["p"]
+
+            # GBM entry price (slight random walk from typical)
+            entry = base_price * math.exp(random.gauss(0, 0.01))
+            direction = random.choice(["LONG", "SHORT"])
+            strategy = random.choice(self.strategies)
+            lots = random.randint(1, 5)
+
+            # Update engine status: position open
+            self.open_positions += 1
+            self._push_status()
+
+            # Hold for 3-8 bars
+            hold_bars = random.randint(3, 8)
+            price = entry
+            for _ in range(hold_bars):
+                if self._stop_event.is_set():
+                    break
+                self._stop_event.wait(self.speed)
+                dt = 1.0 / 252
+                price *= math.exp((mu - 0.5 * sigma**2) * dt + sigma * math.sqrt(dt) * random.gauss(0, 1))
+
+            if self._stop_event.is_set():
+                self.open_positions = max(0, self.open_positions - 1)
+                break
+
+            exit_price = price
+            if direction == "LONG":
+                pnl = (exit_price - entry) * lots * 100
+            else:
+                pnl = (entry - exit_price) * lots * 100
+            pnl = round(pnl, 2)
+
+            exit_reason = random.choice(self.exit_reasons)
+            entry_time = datetime.now().isoformat()
+
+            # Write trade to SQLite
+            with _db() as c:
+                c.execute(
+                    "INSERT INTO trades(symbol,strategy,direction,entry_price,"
+                    "exit_price,net_pnl,exit_reason,entry_time,lots,source) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (sym, strategy, direction, round(entry, 2), round(exit_price, 2),
+                     pnl, exit_reason, entry_time, lots, "simulation"),
+                )
+                # Log the trade
+                msg = f"SIM {direction} {sym} x{lots} | entry={self.currency}{entry:.2f} exit={self.currency}{exit_price:.2f} pnl={pnl:+.2f} ({exit_reason})"
+                c.execute("INSERT INTO logs(ts,level,message) VALUES(?,?,?)",
+                          (datetime.now().isoformat(), "INFO", msg))
+
+            self.capital += pnl
+            self.daily_pnl += pnl
+            self.trades_count += 1
+            self.open_positions = max(0, self.open_positions - 1)
+            self._push_status()
+
+            # Brief pause between trades
+            self._stop_event.wait(self.speed * 0.5)
+
+    def _push_status(self):
+        kv_set("engine_status", {
+            "running": True,
+            "halted": False,
+            "capital": round(self.capital, 2),
+            "daily_pnl": round(self.daily_pnl, 2),
+            "open_positions": self.open_positions,
+            "trades_today": self.trades_count,
+            "max_daily_loss": 0,
+            "updated_at": datetime.now().isoformat(),
+            "mode": "simulation",
+            "market": self.market_id,
+        })
+
+    def status_dict(self):
+        return {
+            "running": self.running,
+            "market": self.market_id,
+            "speed": self.speed,
+            "trades": self.trades_count,
+            "capital": round(self.capital, 2),
+            "daily_pnl": round(self.daily_pnl, 2),
+            "started_at": self.started_at,
+            "elapsed": str(timedelta(seconds=int(time.time() - time.mktime(
+                datetime.fromisoformat(self.started_at).timetuple())))) if self.started_at else "0:00:00",
+        }
+
+
+_simulator = None
+_sim_lock = threading.Lock()
+
+
 # ── Public routes ─────────────────────────────────────────────
 @app.route("/")
 def index():
     return render_template_string(DASHBOARD_HTML,
         CUR=_CUR, LOCALE=_LOCALE, JS_TZ=_JS_TZ, TZ_LABEL=_TZ_LABEL,
-        MAX_DD_K=_MAX_DD_K, FMT_JS=_FMT_JS, MARKET=_MARKET,
+        MAX_DD_K=_MAX_DD_K, FMT_JS=_FMT_JS, FMT_FACTORY_JS=_FMT_FACTORY_JS,
+        MARKET=_MARKET,
         RISK_CAPITAL=_RISK_CAPITAL, MAX_DAILY_LOSS_PCT=_MAX_DAILY_LOSS_PCT,
         MAX_DD_PCT=_MAX_DD_PCT, MAX_POSITIONS=_MAX_POSITIONS,
         MAX_TRADES_DAY=_MAX_TRADES_DAY, MIN_RR=_MIN_RR)
@@ -280,6 +500,88 @@ def api_status():
         }
     })
 
+# ── Markets + Simulation API ─────────────────────────────────
+@app.route("/api/markets")
+def api_markets():
+    result = []
+    for mid, m in WORLD_MARKETS.items():
+        status, lt = _market_status(mid)
+        result.append({
+            "id": mid, "name": m["name"], "flag": m["flag"], "index": m["index"],
+            "status": status, "local_time": lt, "currency": m["currency"],
+            "locale": m["locale"], "tz": m["tz"], "tz_label": m["tz_label"],
+            "instruments": [x["s"] for x in m["instruments"]],
+        })
+    return jsonify(result)
+
+@app.route("/api/sim/start", methods=["POST"])
+def sim_start():
+    global _simulator
+    d = request.get_json(silent=True) or {}
+    market = d.get("market", "US")
+    speed = int(d.get("speed", 5))
+    if market not in WORLD_MARKETS:
+        return jsonify({"error": "unknown market"}), 400
+    with _sim_lock:
+        if _simulator and _simulator.running:
+            _simulator.stop()
+            _simulator.join(timeout=3)
+        _simulator = DemoSimulator(market_id=market, speed=speed)
+        _simulator.start()
+    # Log start
+    with _db() as c:
+        c.execute("INSERT INTO logs(ts,level,message) VALUES(?,?,?)",
+                  (datetime.now().isoformat(), "INFO",
+                   f"Simulation started: {market} market, {speed}s/bar"))
+    return jsonify({"status": "started", "market": market, "speed": speed})
+
+@app.route("/api/sim/stop", methods=["POST"])
+def sim_stop():
+    global _simulator
+    with _sim_lock:
+        if _simulator and _simulator.running:
+            _simulator.stop()
+            _simulator.join(timeout=3)
+            # Update engine status to stopped
+            kv_set("engine_status", {
+                "running": False, "halted": False,
+                "capital": round(_simulator.capital, 2),
+                "daily_pnl": round(_simulator.daily_pnl, 2),
+                "open_positions": 0,
+                "trades_today": _simulator.trades_count,
+                "max_daily_loss": 0,
+                "updated_at": datetime.now().isoformat(),
+                "mode": "simulation",
+            })
+            with _db() as c:
+                c.execute("INSERT INTO logs(ts,level,message) VALUES(?,?,?)",
+                          (datetime.now().isoformat(), "INFO", "Simulation stopped"))
+    return jsonify({"status": "stopped"})
+
+@app.route("/api/sim/status")
+def sim_status():
+    global _simulator
+    if _simulator:
+        return jsonify(_simulator.status_dict())
+    return jsonify({"running": False, "market": None, "trades": 0})
+
+@app.route("/api/sim/reset", methods=["POST"])
+def sim_reset():
+    global _simulator
+    with _sim_lock:
+        if _simulator and _simulator.running:
+            _simulator.stop()
+            _simulator.join(timeout=3)
+        _simulator = None
+    # Clear all data
+    with _db() as c:
+        c.execute("DELETE FROM trades")
+        c.execute("DELETE FROM logs")
+        c.execute("DELETE FROM kv")
+    _init_db()
+    return jsonify({"status": "reset"})
+
+
 # ── Setup Guide ───────────────────────────────────────────────
 _SETUP_US = r"""
 <h1>TradeBot &#8212; US Market Setup</h1>
@@ -368,6 +670,7 @@ nav{background:var(--sf);border-bottom:1px solid var(--bd);padding:0 16px;displa
 .ep{border-radius:12px;padding:2px 10px;font-size:11px;font-weight:600;border:1px solid var(--bd);color:var(--tx2);background:var(--sf2)}
 .ep.on{background:#0a2818;border-color:var(--up);color:var(--up)}
 .ep.halt{background:#3d0f0f;border-color:var(--dn);color:var(--dn)}
+.ep.sim{background:#1a1a2e;border-color:#5b5fc7;color:#8b8ff5}
 .clk{font-size:11px;color:var(--tx2);font-variant-numeric:tabular-nums}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 
@@ -375,8 +678,31 @@ nav{background:var(--sf);border-bottom:1px solid var(--bd);padding:0 16px;displa
 .mx{max-width:1120px;margin:0 auto;padding:16px 14px 40px}
 .hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px}
 .title{font-size:1.15rem;font-weight:700}.sub{font-size:11px;color:var(--tx2);margin-top:1px}
-.btn{background:transparent;border:1px solid var(--bd);color:var(--tx2);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px}
+.btn{background:transparent;border:1px solid var(--bd);color:var(--tx2);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;transition:all .2s}
 .btn:hover{background:var(--sf2);color:var(--tx)}
+.btn-up{border-color:var(--up);color:var(--up)}.btn-up:hover{background:#0a2818}
+.btn-dn{border-color:var(--dn);color:var(--dn)}.btn-dn:hover{background:#3d0f0f}
+.btn-wn{border-color:var(--wn);color:var(--wn)}.btn-wn:hover{background:#3d2e0a}
+.btn-ac{border-color:var(--ac);color:var(--ac)}.btn-ac:hover{background:#0d1a3d}
+
+/* Market cards */
+.market-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+.mc{background:var(--sf2);border:1px solid var(--bd);border-radius:6px;padding:10px;cursor:pointer;transition:all .2s;border-left:3px solid var(--bd)}
+.mc:hover{border-color:var(--ac);background:#1e222d}
+.mc.selected{border-color:var(--ac);box-shadow:0 0 8px #2962ff30;background:#131722}
+.mc.st-open{border-left-color:var(--up)}.mc.st-closed{border-left-color:var(--dn)}.mc.st-lunch{border-left-color:var(--wn)}
+.mc-flag{font-size:1.2rem;margin-bottom:2px}
+.mc-name{font-size:10px;font-weight:700;color:var(--tx);text-transform:uppercase;letter-spacing:.3px}
+.mc-idx{font-size:10px;color:var(--tx2)}
+.mc-status{display:flex;align-items:center;gap:4px;margin-top:4px;font-size:10px}
+.mc-time{font-size:9px;color:var(--tx2);margin-top:2px}
+
+/* Sim controls */
+.sim-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sim-status{font-size:12px;font-weight:600;padding:4px 10px;border-radius:12px;border:1px solid var(--bd);background:var(--sf2);color:var(--tx2)}
+.sim-status.running{background:#1a1a2e;border-color:#5b5fc7;color:#8b8ff5;animation:pulse 2s infinite}
+.sim-sel{background:var(--sf2);border:1px solid var(--bd);color:var(--tx);padding:4px 8px;border-radius:4px;font-size:11px}
+.sim-info{font-size:10px;color:var(--tx2);margin-left:auto}
 
 /* KPI strip */
 .kpi{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px}
@@ -410,7 +736,7 @@ nav{background:var(--sf);border-bottom:1px solid var(--bd);padding:0 16px;displa
 .gp.fail{background:#3d0f0f;border:1px solid var(--dn);color:var(--dn)}
 .gp.banner{background:#0d2b2b;border:1px solid var(--up);color:var(--up);padding:6px 14px}
 .dot{width:7px;height:7px;border-radius:50%;display:inline-block}
-.dot.g{background:var(--up)}.dot.r{background:var(--dn)}.dot.m{background:var(--tx2)}
+.dot.g{background:var(--up)}.dot.r{background:var(--dn)}.dot.m{background:var(--tx2)}.dot.y{background:var(--wn)}
 .dot.live{animation:pulse 2s infinite}
 
 /* Trade table */
@@ -431,9 +757,13 @@ tr:last-child td{border-bottom:none}tr:hover td{background:#1e222d08}
 /* Responsive */
 @media(max-width:768px){
 .kpi{grid-template-columns:repeat(2,1fr)}
+.market-grid{grid-template-columns:repeat(2,1fr)}
 .rg{grid-template-columns:1fr}
 .btm{grid-template-columns:1fr}
 .eq-chart{height:140px}.dd-chart{height:45px}
+}
+@media(max-width:480px){
+.market-grid{grid-template-columns:1fr 1fr}
 }
 </style></head><body>
 
@@ -441,7 +771,7 @@ tr:last-child td{border-bottom:none}tr:hover td{background:#1e222d08}
   <span class="brand">TradeBot</span>
   <a class="nav-link" href="/">Dashboard</a>
   <a class="nav-link" href="/setup">Setup</a>
-  <span class="badge">LIVE</span>
+  <span class="badge">v2</span>
   <div style="flex:1"></div>
   <span class="ep" id="ep">connecting...</span>
   <span class="clk" id="clk"></span>
@@ -452,6 +782,28 @@ tr:last-child td{border-bottom:none}tr:hover td{background:#1e222d08}
   <div class="hdr">
     <div><div class="title">Trading Dashboard</div><div class="sub" id="ud">Connecting...</div></div>
     <button class="btn" onclick="loadAll()">&#8635; Refresh</button>
+  </div>
+
+  <!-- World Markets -->
+  <div class="card">
+    <div class="ch"><h3>World Markets</h3><span style="font-size:10px;color:var(--tx2)" id="mt">Live status</span></div>
+    <div class="market-grid" id="ml">Loading markets...</div>
+  </div>
+
+  <!-- Simulation Controls -->
+  <div class="card">
+    <div class="ch"><h3>Simulation</h3><span class="sim-status" id="ss">Stopped</span></div>
+    <div class="sim-row">
+      <select class="sim-sel" id="sp">
+        <option value="2">Turbo (2s)</option>
+        <option value="5" selected>Normal (5s)</option>
+        <option value="10">Slow (10s)</option>
+      </select>
+      <button class="btn btn-up" onclick="simStart()">&#9654; Start</button>
+      <button class="btn btn-dn" onclick="simStop()">&#9632; Stop</button>
+      <button class="btn btn-wn" onclick="simReset()">&#8634; Reset</button>
+      <span class="sim-info" id="si2"></span>
+    </div>
   </div>
 
   <!-- KPI Strip -->
@@ -509,28 +861,109 @@ tr:last-child td{border-bottom:none}tr:hover td{background:#1e222d08}
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
-/* ── Config (injected) ── */
-const C="{{ CUR }}",L="{{ LOCALE }}",TZ="{{ JS_TZ }}",TZL="{{ TZ_LABEL }}",MK="{{ MARKET }}";
+/* ── Config (injected — use let for market switching) ── */
+let C="{{ CUR }}",L="{{ LOCALE }}",TZ="{{ JS_TZ }}",TZL="{{ TZ_LABEL }}",MK="{{ MARKET }}";
 const RC={cap:{{ RISK_CAPITAL }},mdl:{{ MAX_DAILY_LOSS_PCT }},mdd:{{ MAX_DD_PCT }},mxp:{{ MAX_POSITIONS }},mxt:{{ MAX_TRADES_DAY }},rr:{{ MIN_RR }}};
 {{ FMT_JS|safe }}
+{{ FMT_FACTORY_JS|safe }}
+let selectedMarket=MK;
 
 let ecChart=null,dcChart=null;
 const $=id=>document.getElementById(id);
 
 /* ── Clock ── */
-setInterval(()=>$('clk').textContent=new Date().toLocaleTimeString(L,{timeZone:TZ,hour:'2-digit',minute:'2-digit',second:'2-digit'})+' '+TZL,1000);
+setInterval(()=>{try{$('clk').textContent=new Date().toLocaleTimeString(L,{timeZone:TZ,hour:'2-digit',minute:'2-digit',second:'2-digit'})+' '+TZL}catch(e){}},1000);
 
 /* ── Helpers ── */
 function pbc(pct){return pct>80?'var(--dn)':pct>50?'var(--wn)':'var(--up)'}
 function clr(v){return v>0?'var(--up)':v<0?'var(--dn)':'var(--tx2)'}
 function sign(v){return v>0?'+'+fmt(v):v<0?'-'+fmt(Math.abs(v)):fmt(0)}
 
+/* ── Load Markets ── */
+async function loadMarkets(){
+  try{
+    const mkts=await fetch('/api/markets').then(r=>r.json());
+    const dotCls={open:'g live',closed:'r',lunch:'y'};
+    const dotLbl={open:'Open',closed:'Closed',lunch:'Lunch'};
+    $('ml').innerHTML=mkts.map(m=>{
+      const sel=m.id===selectedMarket?' selected':'';
+      return`<div class="mc st-${m.status}${sel}" onclick="selectMarket('${m.id}',this)" data-mid="${m.id}">
+        <div class="mc-flag">${m.flag}</div>
+        <div class="mc-name">${m.name}</div>
+        <div class="mc-idx">${m.index}</div>
+        <div class="mc-status"><span class="dot ${dotCls[m.status]||'m'}"></span><span style="color:${m.status==='open'?'var(--up)':m.status==='lunch'?'var(--wn)':'var(--dn)'}">${dotLbl[m.status]||m.status}</span></div>
+        <div class="mc-time">${m.local_time}</div>
+      </div>`;
+    }).join('');
+    const openCount=mkts.filter(m=>m.status==='open').length;
+    $('mt').textContent=openCount+' market'+(openCount!==1?'s':'')+' open';
+  }catch(e){console.error('markets error',e);}
+}
+
+/* ── Select Market ── */
+function selectMarket(id,el){
+  selectedMarket=id;
+  document.querySelectorAll('.mc').forEach(c=>c.classList.remove('selected'));
+  if(el)el.classList.add('selected');
+  /* We don't change fmt/currency here since trades are stored server-side.
+     The market selection is used for simulation start. */
+}
+
+/* ── Simulation Controls ── */
+async function simStart(){
+  const speed=$('sp').value;
+  try{
+    const r=await fetch('/api/sim/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({market:selectedMarket,speed:parseInt(speed)})});
+    const d=await r.json();
+    if(d.status==='started'){
+      $('ss').textContent='Running ('+selectedMarket+')';$('ss').className='sim-status running';
+      setTimeout(loadAll,2000);
+    }
+  }catch(e){console.error('sim start error',e);}
+}
+
+async function simStop(){
+  try{
+    await fetch('/api/sim/stop',{method:'POST'});
+    $('ss').textContent='Stopped';$('ss').className='sim-status';
+    setTimeout(loadAll,500);
+  }catch(e){console.error('sim stop error',e);}
+}
+
+async function simReset(){
+  try{
+    await fetch('/api/sim/reset',{method:'POST'});
+    $('ss').textContent='Stopped';$('ss').className='sim-status';
+    $('si2').textContent='';
+    if(ecChart){ecChart.destroy();ecChart=null;}
+    if(dcChart){dcChart.destroy();dcChart=null;}
+    setTimeout(loadAll,500);
+  }catch(e){console.error('sim reset error',e);}
+}
+
+async function loadSimStatus(){
+  try{
+    const d=await fetch('/api/sim/status').then(r=>r.json());
+    if(d.running){
+      $('ss').textContent='Running ('+d.market+')';$('ss').className='sim-status running';
+      $('si2').textContent=d.trades+' trades | '+C+Math.round(d.daily_pnl)+' P&L | '+d.elapsed;
+    }else if(d.trades>0){
+      $('ss').textContent='Stopped';$('ss').className='sim-status';
+      $('si2').textContent=d.trades+' trades completed';
+    }else{
+      $('ss').textContent='Stopped';$('ss').className='sim-status';
+      $('si2').textContent='Select a market and click Start';
+    }
+  }catch(e){}
+}
+
 /* ── Load Status ── */
 async function loadStatus(){
   const d=await fetch('/api/status').then(r=>r.json());
   const e=d.engine||{};
   const ep=$('ep');
-  if(e.halted){ep.className='ep halt';ep.textContent='HALTED';}
+  if(e.mode==='simulation'){ep.className='ep sim';ep.textContent='Simulation';}
+  else if(e.halted){ep.className='ep halt';ep.textContent='HALTED';}
   else if(e.running){ep.className='ep on';ep.textContent='Engine Live';}
   else{ep.className='ep';ep.textContent='Engine Offline';}
   $('si').innerHTML=[
@@ -626,7 +1059,7 @@ function loadGate(m){
 async function loadTrades(){
   const d=await fetch('/api/trades?limit=30').then(r=>r.json());
   $('tc').textContent='Showing '+Math.min(d.trades.length,30)+' of '+d.total+' trades';
-  if(!d.trades.length)return;
+  if(!d.trades.length){$('tb').innerHTML='<tr><td colspan="9" style="color:var(--tx2);text-align:center;padding:20px">No trades yet &#8212; start a simulation above</td></tr>';return;}
   const tfmt=t=>{try{const dt=new Date(t);return dt.toLocaleDateString(L,{month:'short',day:'numeric',timeZone:TZ})+' '+dt.toLocaleTimeString(L,{hour:'2-digit',minute:'2-digit',timeZone:TZ})}catch(e){return(t||'').slice(0,16)}};
   $('tb').innerHTML=d.trades.map(t=>{
     const p=parseFloat(t.net_pnl||0),w=p>0;
@@ -660,7 +1093,7 @@ async function loadLogs(){
 async function loadAll(){
   $('ud').textContent='Updated '+new Date().toLocaleTimeString(L,{timeZone:TZ})+' '+TZL;
   try{
-    const[kpi,,]=await Promise.all([loadKPI(),loadEquity(),loadTrades(),loadLogs()]);
+    const[kpi,,]=await Promise.all([loadKPI(),loadEquity(),loadTrades(),loadLogs(),loadStatus(),loadMarkets(),loadSimStatus()]);
     loadGate(kpi.m);
     loadRisk(kpi.s);
   }catch(e){console.error('poll error',e);}
