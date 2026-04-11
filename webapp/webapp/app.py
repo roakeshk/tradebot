@@ -562,8 +562,8 @@ async function loadKPI(){
 
 /* ── Load Risk ── */
 function loadRisk(s){
-  const e=(s&&s.engine)||{};
-  const rc=(s&&s.risk_config)||RC;
+  const e=(s?s.engine:null)||{};
+  const rc=(s?s.risk_config:null)||RC;
   const mdl=rc.max_capital*rc.max_daily_loss_pct/100;
   const mdd=rc.max_capital*rc.max_dd_pct/100;
   const halted=!!e.halted;
