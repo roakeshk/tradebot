@@ -1,10 +1,10 @@
 """
 TradeBot Web App — LIVE on Railway
 Dashboard: https://tradebot-production-c63c.up.railway.app/
-Callback:  https://tradebot-production-c63c.up.railway.app/callback
 
 ProxyFix added so request.host_url returns https:// (not http://) behind Railway proxy.
 TRADEBOT_KEY read from Railway environment variable (not hardcoded).
+Supports MARKET=US (default) or MARKET=INDIA via Railway env var.
 """
 import json, os, sqlite3, math
 from datetime import datetime
@@ -16,8 +16,33 @@ app = Flask(__name__)
 # Fix: Railway sits behind a reverse proxy — this makes request.host_url return https://
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
-DB_PATH = Path(os.environ.get("DATA_DIR", "/tmp")) / "tradebot_web.db"
+# ── Market-aware display config (standalone relay app — no tradebot deps) ──
+_MARKET   = os.environ.get("MARKET", "US")
+_CUR      = "$"              if _MARKET == "US" else "₹"
+_LOCALE   = "en-US"          if _MARKET == "US" else "en-IN"
+_TZ_LABEL = "ET"             if _MARKET == "US" else "IST"
+_JS_TZ    = "America/New_York" if _MARKET == "US" else "Asia/Kolkata"
+_MAX_DD   = float(os.environ.get("MAX_DD", "5000" if _MARKET == "US" else "12000"))
+_MAX_DD_K = f"{_CUR}{_MAX_DD/1000:.0f}k"
+
+# US: fmt in millions/thousands; India: in lakhs/thousands
+if _MARKET == "US":
+    _FMT_JS = (
+        r"const fmt=v=>{const a=Math.abs(v),"
+        r"s=a>=1000000?'CUR'+(a/1000000).toFixed(2)+'M':"
+        r"a>=1000?'CUR'+(a/1000).toFixed(1)+'k':'CUR'+Math.round(a).toLocaleString('LOCALE');"
+        r"return v<0?'-'+s:s};"
+    ).replace("CUR", _CUR).replace("LOCALE", _LOCALE)
+else:
+    _FMT_JS = (
+        r"const fmt=v=>{const a=Math.abs(v),"
+        r"s=a>=100000?'CUR'+(a/100000).toFixed(1)+'L':'CUR'+Math.round(a).toLocaleString('LOCALE');"
+        r"return v<0?'-'+s:s};"
+    ).replace("CUR", _CUR).replace("LOCALE", _LOCALE)
+
 RAILWAY_URL = "https://tradebot-production-c63c.up.railway.app"
+
+DB_PATH = Path(os.environ.get("DATA_DIR", "/tmp")) / "tradebot_web.db"
 
 def _db():
     conn = sqlite3.connect(str(DB_PATH))
@@ -57,7 +82,9 @@ def _check_key():
 # ── Public routes ──────────────────────────────────────────────
 @app.route("/")
 def index():
-    return render_template_string(DASHBOARD_HTML)
+    return render_template_string(DASHBOARD_HTML,
+        CUR=_CUR, LOCALE=_LOCALE, JS_TZ=_JS_TZ, TZ_LABEL=_TZ_LABEL,
+        MAX_DD_K=_MAX_DD_K, FMT_JS=_FMT_JS, MARKET=_MARKET)
 
 @app.route("/health")
 def health():
@@ -65,28 +92,28 @@ def health():
 
 @app.route("/callback")
 def callback():
-    """Angel One SmartAPI OAuth callback."""
-    auth = request.args.get("auth_token","")
-    feed = request.args.get("feed_token","")
+    """OAuth / token callback endpoint — broker-agnostic."""
+    auth = request.args.get("auth_token","") or request.args.get("token","")
+    source = request.args.get("source","broker")
     if auth:
-        kv_set("angel_auth_token", auth)
-        kv_set("angel_token_time", datetime.now().isoformat())
-        if feed: kv_set("angel_feed_token", feed)
+        kv_set("broker_auth_token", auth)
+        kv_set("broker_token_time", datetime.now().isoformat())
+        kv_set("broker_token_source", source)
         return (
             "<html><body style='background:#0f1117;color:#2dd4bf;"
             "font-family:sans-serif;padding:40px'>"
-            "<h2>✓ Angel One connected</h2>"
+            f"<h2>&#10003; Connected ({source})</h2>"
             "<p style='color:#8892a4'>Token saved. Close this tab.</p>"
             "</body></html>"
         )
-    base = request.host_url.rstrip("/")   # ProxyFix ensures this is https://
+    base = request.host_url.rstrip("/")
     return (
         f"<html><body style='background:#0f1117;color:#e2e8f0;"
         f"font-family:sans-serif;padding:40px'>"
         f"<h2 style='color:#2dd4bf'>TradeBot Callback</h2>"
-        f"<p style='color:#8892a4'>This endpoint is registered with Angel One SmartAPI.<br>"
-        f"Callback URL: <code style='color:#2dd4bf'>{base}/callback</code><br>"
-        f"<a href='/' style='color:#2dd4bf'>← Dashboard</a></p>"
+        f"<p style='color:#8892a4'>Callback URL registered with your broker.<br>"
+        f"Endpoint: <code style='color:#2dd4bf'>{base}/callback</code><br>"
+        f"<a href='/' style='color:#2dd4bf'>&#8592; Dashboard</a></p>"
         f"</body></html>"
     )
 
@@ -94,7 +121,8 @@ def callback():
 def setup():
     base = request.host_url.rstrip("/")
     cb   = base + "/callback"
-    return render_template_string(SETUP_HTML, callback_url=cb, base_url=base)
+    return render_template_string(SETUP_HTML, callback_url=cb, base_url=base,
+                                  MARKET=_MARKET, CUR=_CUR)
 
 # ── Push endpoints (local engine → Railway) ───────────────────
 @app.route("/api/push/trade", methods=["POST"])
@@ -146,7 +174,7 @@ def api_metrics():
         if cum>peak: peak=cum
         if cum-peak<max_dd: max_dd=cum-peak
     gate={"win_rate":wr>=55,"profit_factor":pf>=1.4,
-          "max_drawdown":abs(max_dd)<12000,"min_trades":n>=200}
+          "max_drawdown":abs(max_dd)<_MAX_DD,"min_trades":n>=200}
     gate["all_pass"]=all(gate.values())
     return jsonify({"total_trades":n,"win_rate":round(wr,1),"profit_factor":round(pf,2),
                     "total_pnl":round(sum(pnls),2),"max_drawdown":round(max_dd,2),
@@ -181,12 +209,108 @@ def api_status():
     status = kv_get("engine_status",{})
     with _db() as c:
         n = c.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
-    return jsonify({"engine":status,"angel_token_set":bool(kv_get("angel_auth_token")),
-                    "angel_token_time":kv_get("angel_token_time",""),"db_trades":n,
+    return jsonify({"engine":status,
+                    "broker_token_set":bool(kv_get("broker_auth_token")),
+                    "broker_token_time":kv_get("broker_token_time",""),
+                    "db_trades":n,
+                    "market": _MARKET,
                     "server_time":datetime.now().isoformat(),
                     "railway_url": RAILWAY_URL})
 
-SETUP_HTML = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Setup Guide</title>
+# ── Setup Guide ────────────────────────────────────────────────
+_SETUP_US = r"""
+<h1>TradeBot — US Market Setup Guide</h1>
+<div class="done">&#10003; Railway deployed — dashboard is live at <strong>{{ base_url }}</strong></div>
+
+<h2>Option A — Simulation (no broker required)</h2>
+<div class="step"><div class="sn">1</div>
+<h3>Clone and install</h3>
+<pre>git clone https://github.com/roakeshk/tradebot.git
+cd tradebot
+python -m venv .venv && .venv\Scripts\activate
+pip install -r tradebot/requirements.txt</pre>
+</div>
+<div class="step"><div class="sn">2</div>
+<h3>Set environment and run simulation</h3>
+<pre>set MARKET=US
+cd tradebot
+python main.py --mode simulate --days 90
+
+# Options simulation (no broker)
+python main.py --mode options-sim --days 90
+
+# Stock analysis
+python main.py --mode analyze --symbol AAPL</pre>
+<p>Simulation runs on yfinance historical data — no API key needed.</p>
+</div>
+<div class="step"><div class="sn">3</div>
+<h3>Set Railway env vars to push live data here</h3>
+<pre>Railway dashboard &#8594; Variables:
+  TRADEBOT_KEY = your_secret_key_here
+  MARKET       = US
+
+In your local .env:
+  TRADEBOT_KEY=your_secret_key_here
+  WEBAPP_URL=https://tradebot-production-c63c.up.railway.app
+  MARKET=US</pre>
+</div>
+
+<h2>Option B — Alpaca Paper Trading (free)</h2>
+<div class="step"><div class="sn">4</div>
+<h3>Create free Alpaca account</h3>
+<pre>1. Go to alpaca.markets &#8594; sign up (free)
+2. Dashboard &#8594; Paper Trading &#8594; API Keys
+3. Copy API Key ID and Secret Key</pre>
+</div>
+<div class="step"><div class="sn">5</div>
+<h3>Configure Alpaca in .env or settings.py</h3>
+<pre>MARKET=US
+DATA_SOURCE=alpaca
+ACTIVE_BROKER=alpaca_paper
+ALPACA_KEY=your_api_key_id
+ALPACA_SECRET=your_secret_key
+ALPACA_BASE_URL=https://paper-api.alpaca.markets</pre>
+</div>
+<div class="step"><div class="sn">6</div>
+<h3>Run paper trading</h3>
+<pre>python main.py --mode paper --symbol SPY
+# Dashboard auto-updates at: {{ base_url }}</pre>
+</div>
+"""
+
+_SETUP_INDIA = r"""
+<h1>TradeBot — India Market Setup Guide</h1>
+<div class="done">&#10003; Railway deployed — dashboard is live at <strong>{{ base_url }}</strong></div>
+
+<h2>Your callback URL — paste into SmartAPI form</h2>
+<div class="hi"><code>{{ callback_url }}</code></div>
+
+<div class="warn"><strong>Static IP requirement (April 2026 onwards)</strong>
+Angel One requires all API orders from a registered static IP.
+Cheapest: Oracle Cloud free VM (Mumbai region) — static IP, free forever.</div>
+
+<h2>Steps</h2>
+<div class="step"><div class="sn">1</div>
+<h3>smartapi.angelone.in &#8594; Add App</h3>
+<pre>App Name:          TradeBot
+Redirect URL:      {{ callback_url }}
+Primary Static IP: [your static IP]</pre>
+</div>
+<div class="step"><div class="sn">2</div>
+<h3>Enable TOTP on Angel One mobile app</h3>
+<pre>Angel One App &#8594; Profile &#8594; Security &#8594; Enable TOTP
+Tap "Can't scan?" &#8594; copy base32 secret</pre>
+</div>
+<div class="step"><div class="sn">3</div>
+<h3>Fill config/settings.py with credentials</h3>
+<pre>MARKET=INDIA
+DATA_SOURCE=angel
+ACTIVE_BROKER=paper</pre>
+</div>
+"""
+
+SETUP_HTML = (
+    r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Setup Guide</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0f1117;color:#e2e8f0;font-family:-apple-system,sans-serif;font-size:14px;line-height:1.7}
 nav{background:#161b27;border-bottom:1px solid #2a3245;padding:0 20px;display:flex;align-items:center;gap:20px;height:50px}
 .brand{font-size:1.05rem;font-weight:700;color:#2dd4bf}nav a{color:#8892a4;text-decoration:none;font-size:13px}
@@ -206,78 +330,12 @@ pre{background:#1e2536;border:1px solid #2a3245;border-radius:6px;padding:12px 1
 </style></head><body>
 <nav><span class="brand">TradeBot</span><a href="/">Dashboard</a><a href="/setup">Setup Guide</a></nav>
 <div class="page">
-<h1>Angel One SmartAPI — Setup Guide</h1>
+"""
+    + "{% if MARKET == 'US' %}" + _SETUP_US + "{% else %}" + _SETUP_INDIA + "{% endif %}"
+    + r"</div></body></html>"
+)
 
-<div class="done">✓ Railway deployed — dashboard is live at <strong>{{ base_url }}</strong></div>
-
-<h2>Your callback URL — paste this into the SmartAPI form</h2>
-<div class="hi"><code>{{ callback_url }}</code></div>
-
-<div class="warn"><strong>Static IP requirement (April 2026 onwards)</strong>
-Angel One requires all API orders to come from a registered static IP.
-Your trading engine (main.py) must run from a static IP.
-Cheapest option: Oracle Cloud free VM (Mumbai region) — includes static IP, free forever.
-The Railway dashboard does NOT need a static IP — only your trading engine does.</div>
-
-<h2>Steps</h2>
-<div class="step"><div class="sn">1</div>
-<h3>Fill the SmartAPI form at smartapi.angelone.in → Add App</h3>
-<pre>App Name:          TradeBot
-Redirect URL:      {{ callback_url }}
-Post back URL:     (leave empty)
-Primary Static IP: [your static IP — Oracle Cloud VM or ISP static IP]
-Secondary IP:      (leave empty)</pre>
-<p>Click <strong>Add</strong> → copy the <strong>API Key</strong> shown.</p>
-</div>
-
-<div class="step"><div class="sn">2</div>
-<h3>Enable TOTP on Angel One mobile app</h3>
-<pre>Angel One App → Profile → Security → Enable TOTP
-Tap "Can't scan?" → copy the base32 secret (e.g. JBSWY3DPEHPK3PXP)
-This goes in config/settings.py as totp_secret</pre>
-</div>
-
-<div class="step"><div class="sn">3</div>
-<h3>Fill config/settings.py with your credentials</h3>
-<pre>ANGEL_ONE = {
-    "api_key":     "paste_api_key_here",
-    "client_id":   "your_angel_one_client_id",
-    "password":    "your_4_digit_trading_pin",
-    "totp_secret": "base32_secret_from_step_2",
-}
-DATA_SOURCE   = "angel"
-ACTIVE_BROKER = "paper"</pre>
-</div>
-
-<div class="step"><div class="sn">4</div>
-<h3>Set Railway environment variable</h3>
-<pre>Railway dashboard → your project → Variables:
-  TRADEBOT_KEY = your_secret_key_here
-
-Same value in your local .env:
-  TRADEBOT_KEY=your_secret_key_here
-  WEBAPP_URL=https://tradebot-production-c63c.up.railway.app</pre>
-<p>The engine uses WEBAPP_URL to push trade data to this dashboard.</p>
-</div>
-
-<div class="step"><div class="sn">5</div>
-<h3>Test Angel One connection (from your machine or Oracle VM)</h3>
-<pre>python generate_token_angel.py
-# Should print: "Logged in as: YOUR NAME"</pre>
-</div>
-
-<div class="step"><div class="sn">6</div>
-<h3>Start trading</h3>
-<pre># Simulate options (no broker needed right now)
-python main.py --mode options-sim --days 90
-
-# Paper trading (after Angel One connected)
-python main.py --mode paper
-
-# This dashboard auto-updates at: {{ base_url }}</pre>
-</div>
-</div></body></html>"""
-
+# ── Dashboard HTML ─────────────────────────────────────────────
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TradeBot</title>
@@ -334,26 +392,26 @@ td{padding:7px 9px;border-bottom:1px solid var(--border)}tr:last-child td{border
       <div class="pt">TradeBot Dashboard</div>
       <div class="ps" id="upd">Loading...</div>
     </div>
-    <button class="btn" onclick="loadAll()">↻ Refresh</button>
+    <button class="btn" onclick="loadAll()">&#8635; Refresh</button>
   </div>
   <div class="ss" id="ss"><div class="si"><span class="d dm"></span>Connecting to Railway...</div></div>
   <div class="mg">
-    <div class="mc"><div class="l">Net P&L</div><div class="v" id="mpnl" style="color:var(--teal)">—</div><div class="s">after costs</div></div>
-    <div class="mc"><div class="l">Win rate</div><div class="v" id="mwr" style="color:var(--green)">—</div><div class="s">target ≥55%</div></div>
-    <div class="mc"><div class="l">Prof. factor</div><div class="v" id="mpf">—</div><div class="s">target ≥1.4</div></div>
-    <div class="mc"><div class="l">Trades</div><div class="v" id="mtr" style="color:var(--amber)">—</div><div class="s">target ≥200</div></div>
-    <div class="mc"><div class="l">Sharpe</div><div class="v" id="msh">—</div><div class="s">target ≥0.8</div></div>
-    <div class="mc"><div class="l">Max DD</div><div class="v" id="mdd" style="color:var(--red)">—</div><div class="s">limit ₹12k</div></div>
-    <div class="mc"><div class="l">Expectancy</div><div class="v" id="mex">—</div><div class="s">avg/trade</div></div>
+    <div class="mc"><div class="l">Net P&amp;L</div><div class="v" id="mpnl" style="color:var(--teal)">&#8212;</div><div class="s">after costs</div></div>
+    <div class="mc"><div class="l">Win rate</div><div class="v" id="mwr" style="color:var(--green)">&#8212;</div><div class="s">target &#8805;55%</div></div>
+    <div class="mc"><div class="l">Prof. factor</div><div class="v" id="mpf">&#8212;</div><div class="s">target &#8805;1.4</div></div>
+    <div class="mc"><div class="l">Trades</div><div class="v" id="mtr" style="color:var(--amber)">&#8212;</div><div class="s">target &#8805;200</div></div>
+    <div class="mc"><div class="l">Sharpe</div><div class="v" id="msh">&#8212;</div><div class="s">target &#8805;0.8</div></div>
+    <div class="mc"><div class="l">Max DD</div><div class="v" id="mdd" style="color:var(--red)">&#8212;</div><div class="s" id="m-dd-limit">limit: {{ MAX_DD_K }}</div></div>
+    <div class="mc"><div class="l">Expectancy</div><div class="v" id="mex">&#8212;</div><div class="s">avg/trade</div></div>
   </div>
-  <div class="card"><div class="ch"><h3>Gate check — all green before live capital</h3></div>
+  <div class="card"><div class="ch"><h3>Gate check &#8212; all green before live capital</h3></div>
     <div class="gg" id="gg"><div class="gi gn"><span class="d dm"></span>Loading...</div></div></div>
   <div class="card"><div class="ch"><h3>Equity curve</h3></div><div class="cw"><canvas id="ec"></canvas></div></div>
   <div class="card">
     <div class="ch"><h3>Recent trades</h3><span style="font-size:11px;color:var(--muted)" id="tc"></span></div>
     <div style="overflow-x:auto"><table>
-      <thead><tr><th>Time</th><th>Strategy</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Net P&L</th><th></th></tr></thead>
-      <tbody id="tb"><tr><td colspan="8" style="color:var(--muted);text-align:center;padding:16px">No trades yet — start paper trading or run simulation</td></tr></tbody>
+      <thead><tr><th>Time</th><th>Strategy</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Net P&amp;L</th><th></th></tr></thead>
+      <tbody id="tb"><tr><td colspan="8" style="color:var(--muted);text-align:center;padding:16px">No trades yet &#8212; start paper trading or run simulation</td></tr></tbody>
     </table></div>
   </div>
   <div class="card"><div class="ch"><h3>Engine log</h3><button class="btn" onclick="loadLogs()">Refresh</button></div>
@@ -361,17 +419,19 @@ td{padding:7px 9px;border-bottom:1px solid var(--border)}tr:last-child td{border
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
+const CUR="{{ CUR }}",LOCALE="{{ LOCALE }}",JS_TZ="{{ JS_TZ }}",MAX_DD_K="{{ MAX_DD_K }}";
+{{ FMT_JS }}
 let ec=null;
-const fmt=v=>{const a=Math.abs(v),s=a>=100000?'₹'+(a/100000).toFixed(1)+'L':'₹'+Math.round(a).toLocaleString('en-IN');return v<0?'-'+s:s};
-setInterval(()=>document.getElementById('clk').textContent=new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'}),1000);
+setInterval(()=>document.getElementById('clk').textContent=new Date().toLocaleTimeString(LOCALE,{timeZone:JS_TZ}),1000);
 async function loadStatus(){const d=await fetch('/api/status').then(r=>r.json());const e=d.engine||{};
   document.getElementById('ep').className='pill'+(e.running?' on':'');
   document.getElementById('ep').textContent=e.running?'Engine live':'Engine offline';
   document.getElementById('ss').innerHTML=[
-    {l:'Angel token',ok:d.angel_token_set},
+    {l:'Broker token',ok:d.broker_token_set},
     {l:'Engine',ok:!!e.running},
     {l:'Trades ('+d.db_trades+')',ok:d.db_trades>0},
-    {l:'Railway ✓',ok:true},
+    {l:'Railway &#10003;',ok:true},
+    {l:(d.market||'US')+' market',ok:true},
   ].map(i=>`<div class="si"><span class="d ${i.ok?'dg':'dr'}"></span>${i.l}</div>`).join('');}
 async function loadMetrics(){const d=await fetch('/api/metrics').then(r=>r.json());
   document.getElementById('mpnl').textContent=fmt(d.total_pnl);
@@ -383,32 +443,32 @@ async function loadMetrics(){const d=await fetch('/api/metrics').then(r=>r.json(
   document.getElementById('mex').textContent=fmt(d.expectancy);
   const g=d.gate;
   document.getElementById('gg').innerHTML=[
-    {l:'Win rate ≥55% ('+d.win_rate+'%)',p:g.win_rate},
-    {l:'PF ≥1.4 ('+d.profit_factor+')',p:g.profit_factor},
-    {l:'Max DD <₹12k',p:g.max_drawdown},
-    {l:'Trades ≥200 ('+d.total_trades+')',p:g.min_trades},
+    {l:'Win rate &#8805;55% ('+d.win_rate+'%)',p:g.win_rate},
+    {l:'PF &#8805;1.4 ('+d.profit_factor+')',p:g.profit_factor},
+    {l:'Max DD <'+MAX_DD_K+' ('+fmt(Math.abs(d.max_drawdown))+')',p:g.max_drawdown},
+    {l:'Trades &#8805;200 ('+d.total_trades+')',p:g.min_trades},
   ].map(x=>`<div class="gi ${x.p?'gp':'gf'}"><span class="d ${x.p?'dg':'dr'}"></span>${x.l}</div>`).join('')+
-  (g.all_pass?'<div class="gi gp" style="grid-column:1/-1"><span class="d dg"></span>ALL GATES PASSED — ready for live capital</div>':'');}
+  (g.all_pass?'<div class="gi gp" style="grid-column:1/-1"><span class="d dg"></span>ALL GATES PASSED &#8212; ready for live capital</div>':'');}
 async function loadEquity(){const d=await fetch('/api/equity').then(r=>r.json());if(!d.equity.length)return;
   const ctx=document.getElementById('ec').getContext('2d');const last=d.equity[d.equity.length-1];const col=last>=d.capital?'#2dd4bf':'#f87171';
-  if(ec)ec.destroy();ec=new Chart(ctx,{type:'line',data:{labels:d.equity.map((_,i)=>i+1),datasets:[{data:d.equity,borderColor:col,borderWidth:1.5,fill:true,backgroundColor:col+'18',tension:.3,pointRadius:0,pointHoverRadius:3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{ticks:{color:'#8892a4',callback:v=>'₹'+Math.round(v).toLocaleString('en-IN')},grid:{color:'#2a3245'}}}}});}
+  if(ec)ec.destroy();ec=new Chart(ctx,{type:'line',data:{labels:d.equity.map((_,i)=>i+1),datasets:[{data:d.equity,borderColor:col,borderWidth:1.5,fill:true,backgroundColor:col+'18',tension:.3,pointRadius:0,pointHoverRadius:3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{ticks:{color:'#8892a4',callback:v=>CUR+Math.round(v).toLocaleString(LOCALE)},grid:{color:'#2a3245'}}}}});}
 async function loadTrades(){const d=await fetch('/api/trades?limit=30').then(r=>r.json());
   document.getElementById('tc').textContent=d.total+' total';if(!d.trades.length)return;
   document.getElementById('tb').innerHTML=d.trades.map(t=>{const p=parseFloat(t.net_pnl||0),w=p>0;
     const dc=(t.direction||'').includes('LONG')?'var(--green)':(t.direction||'').includes('OPTIONS')?'#2dd4bf':'var(--red)';
-    return`<tr><td style="color:var(--muted);white-space:nowrap">${(t.entry_time||'').toString().slice(0,16)}</td><td>${t.strategy||'-'}</td><td style="color:${dc}">${t.direction||'-'}</td><td>₹${Math.round(t.entry_price||0)}</td><td>₹${Math.round(t.exit_price||0)}</td><td style="color:var(--muted)">${t.exit_reason||'-'}</td><td style="color:${w?'var(--green)':'var(--red)'};">${w?'+':''}₹${Math.round(p)}</td><td><span class="${w?'bw':'bl'}">${w?'WIN':'LOSS'}</span></td></tr>`;
+    return`<tr><td style="color:var(--muted);white-space:nowrap">${(t.entry_time||'').toString().slice(0,16)}</td><td>${t.strategy||'-'}</td><td style="color:${dc}">${t.direction||'-'}</td><td>${CUR}${Math.round(t.entry_price||0)}</td><td>${CUR}${Math.round(t.exit_price||0)}</td><td style="color:var(--muted)">${t.exit_reason||'-'}</td><td style="color:${w?'var(--green)':'var(--red)'};">${w?'+':''}${fmt(p)}</td><td><span class="${w?'bw':'bl'}">${w?'WIN':'LOSS'}</span></td></tr>`;
   }).join('');}
 async function loadLogs(){const d=await fetch('/api/logs').then(r=>r.json());const b=document.getElementById('lg');
   if(!d.lines.length){b.textContent='No logs yet. Start the engine.';return;}
   b.innerHTML=d.lines.map(l=>`<div style="color:${l.includes('ERROR')?'var(--red)':l.includes('WARN')?'var(--amber)':l.includes('WIN')||l.includes('FILL')||l.includes('TARGET')?'var(--green)':'var(--muted)'}">${l}</div>`).join('');b.scrollTop=b.scrollHeight;}
-async function loadAll(){document.getElementById('upd').textContent='Updated: '+new Date().toLocaleTimeString('en-IN');
+async function loadAll(){document.getElementById('upd').textContent='Updated: '+new Date().toLocaleTimeString(LOCALE)+' '+CUR.replace('$','').replace('₹','')+' market';
   await Promise.all([loadStatus(),loadMetrics(),loadEquity(),loadTrades(),loadLogs()]);}
 loadAll();setInterval(loadAll,30000);
 </script></body></html>"""
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"\n  TradeBot Web App")
+    print(f"\n  TradeBot Web App  [{_MARKET} market]")
     print(f"  Dashboard:   http://localhost:{port}/")
     print(f"  Setup guide: http://localhost:{port}/setup")
     print(f"  Callback:    http://localhost:{port}/callback")
