@@ -31,7 +31,10 @@ from options.data import OptionsDataPipeline, ExpiryManager
 from options.backtest import OptionsBacktester
 from data.pipeline import DataPipeline
 from utils.logger import setup_logging
-from config.settings import PRIMARY_TF, RISK
+from config.settings import PRIMARY_TF, RISK, INSTRUMENTS, MARKET, SESSION
+
+_CUR = "$" if MARKET == "US" else "₹"
+_DEF_SYM = list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY"
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +47,11 @@ class OptionsRunner:
 
     def __init__(
         self,
-        symbol:   str   = "BANKNIFTY",
+        symbol:   str   = None,
         capital:  float = 100000,
         use_paper:bool  = True,
     ):
-        self.symbol    = symbol
+        self.symbol    = symbol or _DEF_SYM
         self.capital   = capital
         self.engine    = OptionsExecutionEngine(symbol, capital=capital, use_paper=use_paper)
         self.dp        = DataPipeline()
@@ -58,7 +61,7 @@ class OptionsRunner:
 
     def start(self) -> None:
         """Start paper trading options."""
-        logger.info(f"Options runner starting | {self.symbol} | ₹{self.capital:,.0f}")
+        logger.info(f"Options runner starting | {self.symbol} | {_CUR}{self.capital:,.0f}")
 
         # Load warmup data
         self._df_window = self.dp.get(self.symbol, PRIMARY_TF, n_bars=500)
@@ -85,7 +88,9 @@ class OptionsRunner:
             try:
                 now = datetime.now()
                 t   = now.hour * 60 + now.minute
-                if not (9 * 60 + 15 <= t <= 15 * 60 + 30):
+                _oh, _om = map(int, SESSION["market_open"].split(":"))
+                _ch, _cm = map(int, SESSION["market_close"].split(":"))
+                if not (_oh * 60 + _om <= t <= _ch * 60 + _cm):
                     time.sleep(60)
                     continue
 
@@ -114,8 +119,9 @@ class OptionsRunner:
                 time.sleep(30)
 
 
-def run_options_backtest(symbol: str = "BANKNIFTY") -> None:
+def run_options_backtest(symbol: str = None) -> None:
     """Run options backtest and print results."""
+    symbol = symbol or _DEF_SYM
     setup_logging("options_backtest")
     logger.info(f"Running options backtest for {symbol}")
 
@@ -157,8 +163,9 @@ def get_payoff_data(position, spot: float) -> dict:
     from options.pricing import BSModel
     bs = BSModel()
 
-    spread = max(3000, spot * 0.08)
-    spot_range = [spot - spread + i * 50 for i in range(int(spread * 2 / 50) + 1)]
+    spread = spot * 0.08
+    step   = INSTRUMENTS.get(position.symbol, {}).get("strike_step", 1 if MARKET == "US" else 100)
+    spot_range = [spot - spread + i * step for i in range(int(spread * 2 / step) + 1)]
 
     legs = [
         {
@@ -192,7 +199,7 @@ def get_payoff_data(position, spot: float) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Options runner")
-    parser.add_argument("--symbol",    default="BANKNIFTY")
+    parser.add_argument("--symbol",    default=_DEF_SYM)
     parser.add_argument("--capital",   default=100000, type=float)
     parser.add_argument("--backtest",  action="store_true")
     parser.add_argument("--paper",     action="store_true", default=True)

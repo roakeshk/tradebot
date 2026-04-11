@@ -20,17 +20,23 @@ BASE = Path(__file__).parent
 sys.path.insert(0, str(BASE))
 
 from utils.logger    import setup_logging
-from config.settings import ACTIVE_BROKER
+from config.settings import ACTIVE_BROKER, MARKET, INSTRUMENTS, RISK
 
 
 def main():
+    # Build valid symbol choices from current market config
+    valid_symbols = list(INSTRUMENTS.keys())
+    default_symbol = valid_symbols[0] if valid_symbols else "SPY"
+    currency = RISK.get("currency", "USD")
+
     parser = argparse.ArgumentParser(description="TradeBot — Futures + Options")
     parser.add_argument("--mode",    default="paper",
         choices=["paper","live","simulate","backtest",
-                 "options-sim","options-paper","options-backtest"])
-    parser.add_argument("--symbol",  default="BANKNIFTY",
-        choices=["BANKNIFTY","NIFTY","CRUDEOIL"])
-    parser.add_argument("--capital", default=100000, type=float)
+                 "options-sim","options-paper","options-backtest",
+                 "analyze","screen"])
+    parser.add_argument("--symbol",  default=default_symbol,
+        choices=valid_symbols)
+    parser.add_argument("--capital", default=RISK["max_capital"], type=float)
     parser.add_argument("--days",    default=90,     type=int)
     parser.add_argument("--no-ai",   action="store_true")
     parser.add_argument("--confirm", action="store_true")
@@ -39,12 +45,29 @@ def main():
 
     logger = setup_logging("main")
 
+    cur_sym = "$" if currency == "USD" else "₹"
     print("\n" + "="*60)
-    print("  TradeBot — Futures + Options")
+    print(f"  TradeBot — {MARKET} Market")
     print("="*60)
     print(f"  Symbol:  {args.symbol}")
-    print(f"  Capital: Rs.{args.capital:,.0f}")
+    print(f"  Capital: {cur_sym}{args.capital:,.0f}")
     print(f"  Mode:    {args.mode}\n")
+
+    # ── Stock analysis (no broker needed) ----------------------
+    if args.mode == "analyze":
+        from analysis.stock_analyzer import StockAnalyzer
+        print(f"  Analyzing {args.symbol}...\n")
+        report = StockAnalyzer(args.symbol).full_report()
+        print(report.summary)
+        return
+
+    if args.mode == "screen":
+        from analysis.stock_analyzer import screen_stocks
+        symbols = valid_symbols
+        print(f"  Screening {len(symbols)} stocks...\n")
+        df = screen_stocks(symbols)
+        print(df.to_string(index=False))
+        return
 
     # ── Options simulation (no broker needed) -----------------
     if args.mode == "options-sim":
@@ -112,6 +135,9 @@ def _run_full_simulation(args):
     print("Full simulation: futures + options on historical data")
     print("No broker needed.\n")
 
+    inst     = INSTRUMENTS.get(args.symbol, {})
+    lot_size = inst.get("lot_size", 1)
+
     paper      = PaperBroker(args.capital)
     strategies = build_strategies(args.symbol)
     regime_clf = RegimeClassifier()
@@ -137,7 +163,7 @@ def _run_full_simulation(args):
                         symbol=args.symbol,
                         side=OrderSide.BUY if sig.direction == Direction.LONG else OrderSide.SELL,
                         order_type=OrderType.MARKET,
-                        quantity=res.lots * 15,
+                        quantity=res.lots * lot_size,
                         tag=strat.name[:20],
                     ))
                     risk_mgr.record_open()
@@ -152,8 +178,9 @@ def _run_full_simulation(args):
     # Report
     opt_runner.print_summary()
     fut_trades = paper.get_trade_log()
+    cur_sym = "$" if MARKET == "US" else "₹"
     if not fut_trades.empty and "net_pnl" in fut_trades.columns:
-        print(f"\n Futures: {len(fut_trades)} trades  PnL=Rs.{fut_trades['net_pnl'].sum():,.0f}")
+        print(f"\n Futures: {len(fut_trades)} trades  PnL={cur_sym}{fut_trades['net_pnl'].sum():,.0f}")
     print(f" Simulation: {result.total_bars:,} bars | {args.days} days")
 
 
@@ -172,9 +199,10 @@ def _run_options_paper_live(args):
         while True:
             time.sleep(60)
             s = runner._risk.status()
+            cur = "$" if MARKET == "US" else "₹"
             print(f"  [{datetime.now().strftime('%H:%M')}] "
-                  f"Capital=Rs.{s['capital']:,.0f}  "
-                  f"DailyPnL=Rs.{s['daily_pnl']:,.0f}  "
+                  f"Capital={cur}{s['capital']:,.0f}  "
+                  f"DailyPnL={cur}{s['daily_pnl']:,.0f}  "
                   f"Trades={s['trades_today']}")
     except KeyboardInterrupt:
         feed.stop()

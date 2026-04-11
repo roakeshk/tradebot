@@ -20,6 +20,7 @@ import numpy as np
 
 from options.data    import ExpiryManager, OptionChain, OptionsDataPipeline
 from options.pricing import BSModel
+from config.settings import INSTRUMENTS, MARKET, RISK_FREE_RATE
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,7 @@ class ChainFeed:
         chain = feed.build_from_spot("BANKNIFTY", spot=48500, sigma=0.18)
     """
 
-    DEFAULT_IV = {"BANKNIFTY": 0.18, "NIFTY": 0.14, "CRUDEOIL": 0.25}
-    STEP       = {"BANKNIFTY": 100,  "NIFTY": 50,   "CRUDEOIL": 50}
+    # Config-driven defaults via INSTRUMENTS[symbol]
     STRIKE_RANGE = 20   # strikes either side of ATM
 
     def __init__(
@@ -57,7 +57,7 @@ class ChainFeed:
         self._running  = False
         self._thread: Optional[threading.Thread] = None
         self._lock     = threading.Lock()
-        self._r        = 0.065          # risk-free rate (RBI repo rate proxy)
+        self._r        = RISK_FREE_RATE
 
     # ── Public API ─────────────────────────────────────────────
 
@@ -150,13 +150,14 @@ class ChainFeed:
             expiry: target expiry date (if None, uses nearest weekly)
             dte:    days to expiry override
         """
-        sigma  = sigma  or self.DEFAULT_IV.get(symbol, 0.18)
+        inst   = INSTRUMENTS.get(symbol, {})
+        sigma  = sigma  or inst.get("default_iv", 0.18)
         expiry = expiry or self._expiry_mgr.nearest_expiry(symbol)
         if dte is None:
             dte = max(0, (expiry - date.today()).days)
 
         T    = dte / 365.0 if dte > 0 else 1 / 365.0
-        step = self.STEP.get(symbol, 100)
+        step = inst.get("strike_step", 1 if MARKET == "US" else 100)
         r    = self._r
 
         # Snap ATM to nearest step
@@ -212,8 +213,9 @@ class ChainFeed:
         IV Rank 0–100. Uses rough historical averages.
         In live trading this is computed from a full IV history.
         """
-        hist_low  = {"BANKNIFTY": 0.10, "NIFTY": 0.09,  "CRUDEOIL": 0.20}.get(symbol, 0.12)
-        hist_high = {"BANKNIFTY": 0.40, "NIFTY": 0.35,  "CRUDEOIL": 0.55}.get(symbol, 0.40)
+        inst = INSTRUMENTS.get(symbol, {})
+        hist_low  = inst.get("iv_hist_low",  0.12)
+        hist_high = inst.get("iv_hist_high", 0.40)
         rank = (current_iv - hist_low) / max(0.01, hist_high - hist_low) * 100
         return round(float(np.clip(rank, 0, 100)), 1)
 

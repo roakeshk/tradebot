@@ -34,6 +34,7 @@ import math
 
 from options.pricing import BSModel
 from options.data import OptionChain
+from config.settings import INSTRUMENTS, MARKET
 
 
 @dataclass
@@ -122,9 +123,6 @@ class OptionsPosition:
         return {"delta": delta, "gamma": gamma, "theta": theta, "vega": vega}
 
 
-LOT_SIZES = {"BANKNIFTY": 15, "NIFTY": 50, "MIDCPNIFTY": 75, "FINNIFTY": 40}
-
-
 class OptionsStrategyBuilder:
     """
     Constructs multi-leg options positions from a live chain.
@@ -138,7 +136,17 @@ class OptionsStrategyBuilder:
         self.bs = BSModel()
 
     def _lot_size(self, symbol: str) -> int:
-        return LOT_SIZES.get(symbol, 15)
+        return INSTRUMENTS.get(symbol, {}).get("lot_size", 1)
+
+    def _strike_step(self, symbol: str) -> float:
+        return INSTRUMENTS.get(symbol, {}).get("strike_step", 1 if MARKET == "US" else 100)
+
+    def _min_premium(self, symbol: str) -> float:
+        """Minimum acceptable premium — scaled by market."""
+        inst = INSTRUMENTS.get(symbol, {})
+        spot = inst.get("default_spot", 100)
+        # ~0.02% of spot as minimum floor
+        return max(0.10, spot * 0.0002) if MARKET == "US" else max(5.0, spot * 0.0002)
 
     # ── Strategy 1: Short Straddle ────────────────────────────
 
@@ -168,7 +176,8 @@ class OptionsStrategyBuilder:
         net     = ce_prem + pe_prem
         lot_sz  = self._lot_size(chain.symbol)
 
-        if ce_prem < 10 or pe_prem < 10:
+        min_prem = self._min_premium(chain.symbol)
+        if ce_prem < min_prem or pe_prem < min_prem:
             return None   # premiums too thin
 
         iv_rank = chain.iv_rank or 50
@@ -216,7 +225,7 @@ class OptionsStrategyBuilder:
           Short 48500 CE  + Long 48800 CE  (300-point wide call spread)
           Short 47500 PE  + Long 47200 PE  (300-point wide put spread)
         """
-        step    = 100 if chain.symbol == "BANKNIFTY" else 50
+        step    = self._strike_step(chain.symbol)
         lot_sz  = self._lot_size(chain.symbol)
         atm     = chain.atm
         iv_rank = chain.iv_rank or 50
@@ -255,7 +264,7 @@ class OptionsStrategyBuilder:
         max_profit   = net_credit * lot_sz * lots
         max_loss     = max_loss_per * lot_sz * lots
 
-        if net_credit < 20:   # minimum ₹20 credit per unit
+        if net_credit < self._min_premium(chain.symbol):
             return None
 
         pos = OptionsPosition(
@@ -293,7 +302,7 @@ class OptionsStrategyBuilder:
         Best when: bullish bias, IV moderate (30–60 rank), DTE 5–15 days.
         Max profit = spread - net debit. Max loss = net debit paid.
         """
-        step   = 100 if chain.symbol == "BANKNIFTY" else 50
+        step   = self._strike_step(chain.symbol)
         lot_sz = self._lot_size(chain.symbol)
         atm    = chain.atm
 
@@ -353,7 +362,7 @@ class OptionsStrategyBuilder:
         Buy ATM PE + Sell OTM PE (spread_pts below).
         Mirror of bull call spread for bearish bias.
         """
-        step   = 100 if chain.symbol == "BANKNIFTY" else 50
+        step   = self._strike_step(chain.symbol)
         lot_sz = self._lot_size(chain.symbol)
         atm    = chain.atm
 
@@ -418,7 +427,7 @@ class OptionsStrategyBuilder:
         On BankNifty: sell 2 strikes (200pts) below ATM.
         Probability of profit ~70% historically.
         """
-        step    = 100 if chain.symbol == "BANKNIFTY" else 50
+        step    = self._strike_step(chain.symbol)
         lot_sz  = self._lot_size(chain.symbol)
         atm     = chain.atm
         iv_rank = chain.iv_rank or 50
@@ -438,7 +447,7 @@ class OptionsStrategyBuilder:
         premium = float(row.get("pe_ltp", 0))
         delta   = abs(float(row.get("pe_delta", 0)))
 
-        if premium < 15:
+        if premium < self._min_premium(chain.symbol):
             return None   # too little premium to justify
 
         if delta > 0.35:
@@ -520,7 +529,7 @@ class OptionsStrategyBuilder:
         """
         dte     = chain.days_to_expiry
         iv_rank = chain.iv_rank or 50
-        step    = 100 if chain.symbol == "BANKNIFTY" else 50
+        step    = self._strike_step(chain.symbol)
         lot_sz  = self._lot_size(chain.symbol)
 
         if iv_rank < 55:
@@ -540,7 +549,8 @@ class OptionsStrategyBuilder:
         pe_prem = float(put_row.get("pe_ltp", 0))
         net     = ce_prem + pe_prem
 
-        if ce_prem < 8 or pe_prem < 8:
+        min_prem = self._min_premium(chain.symbol)
+        if ce_prem < min_prem or pe_prem < min_prem:
             return None
 
         pos = OptionsPosition(
@@ -574,7 +584,7 @@ class OptionsStrategyBuilder:
         """
         dte     = chain.days_to_expiry
         iv_rank = chain.iv_rank or 50
-        step    = 100 if chain.symbol == "BANKNIFTY" else 50
+        step    = self._strike_step(chain.symbol)
         lot_sz  = self._lot_size(chain.symbol)
 
         if iv_rank > 50:
@@ -588,7 +598,7 @@ class OptionsStrategyBuilder:
             return None
 
         premium = float(row.get("ce_ltp", 0))
-        if premium < 10:
+        if premium < self._min_premium(chain.symbol):
             return None
 
         cost = premium * lot_sz * lots
@@ -619,7 +629,7 @@ class OptionsStrategyBuilder:
         """
         dte     = chain.days_to_expiry
         iv_rank = chain.iv_rank or 50
-        step    = 100 if chain.symbol == "BANKNIFTY" else 50
+        step    = self._strike_step(chain.symbol)
         lot_sz  = self._lot_size(chain.symbol)
 
         if iv_rank > 50:
@@ -633,7 +643,7 @@ class OptionsStrategyBuilder:
             return None
 
         premium = float(row.get("pe_ltp", 0))
-        if premium < 10:
+        if premium < self._min_premium(chain.symbol):
             return None
 
         cost = premium * lot_sz * lots

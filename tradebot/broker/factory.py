@@ -8,21 +8,20 @@
 #
 #  Recommended combinations:
 #
-#  Phase 1-3 (paper trading):
+#  US market (paper/simulation):
+#    ACTIVE_BROKER = "paper"
+#    DATA_SOURCE   = "yfinance"   <- free, no account needed
+#
+#  India Phase 1-3 (paper trading):
 #    ACTIVE_BROKER = "paper"
 #    DATA_SOURCE   = "angel"   <- free, no subscription
 #
-#  Phase 4 (live, Zerodha):
+#  India Phase 4 (live, Zerodha):
 #    ACTIVE_BROKER = "zerodha" <- free execution (post Apr 2025)
 #    DATA_SOURCE   = "angel"   <- still free
-#    (skip the Rs.2000/mo Kite data subscription entirely)
-#
-#  Phase 5 (scaling):
-#    ACTIVE_BROKER = "shoonya" <- zero brokerage
-#    DATA_SOURCE   = "fyers"   <- or angel, both free
 # ============================================================
 
-from config.settings import ACTIVE_BROKER, DATA_SOURCE
+from config.settings import ACTIVE_BROKER, DATA_SOURCE, MARKET
 from broker.base import BrokerBase
 
 
@@ -30,7 +29,8 @@ def get_broker(override: str = None) -> BrokerBase:
     name = override or ACTIVE_BROKER
     if name == "paper":
         from broker.paper_broker import PaperBroker
-        return PaperBroker()
+        cost_model = "us_paper" if MARKET == "US" else "zerodha"
+        return PaperBroker(cost_model=cost_model)
     if name == "zerodha":
         from broker.zerodha_broker import ZerodhaBroker
         return ZerodhaBroker()
@@ -49,10 +49,11 @@ def get_broker(override: str = None) -> BrokerBase:
 def get_data_source(override: str = None) -> BrokerBase:
     """
     Returns broker instance for DATA only (historical + live ticks).
-    Separate from execution so you can use a free data source
-    even when executing through a paid broker.
+    Returns None for yfinance — DataPipeline handles that directly.
     """
     name = override or DATA_SOURCE
+    if name in ("yfinance", "yf", None, ""):
+        return None   # DataPipeline falls back to yfinance
     if name == "fyers":
         from broker.fyers_broker import FyersBroker
         return FyersBroker()

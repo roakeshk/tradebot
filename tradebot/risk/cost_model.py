@@ -4,15 +4,20 @@
 #  Used by: backtester, paper broker, live execution, reporting.
 #
 #  WHY THIS MATTERS:
+#  On SPY at $500 with 1 lot (100 units):
+#    Notional per trade = $500 × 100 = $50,000
+#    Round-trip cost ≈ $5–10 (commission + SEC fee + slippage)
 #  On BankNifty futures at ₹48,000 with 1 lot (15 units):
 #    Notional per trade = ₹48,000 × 15 = ₹7,20,000
 #    Round-trip cost (buy + sell) ≈ ₹160–200
-#    If your edge is ₹100 per trade, you're LOSING money.
+#  If your edge is smaller than cost, you're LOSING money.
 #  Every backtest must go through this model. No exceptions.
 # ============================================================
 
 from dataclasses import dataclass
-from config.settings import COST_MODEL, INSTRUMENTS
+from config.settings import COST_MODEL, INSTRUMENTS, MARKET
+
+_DEF_BROKER = "us_paper" if MARKET == "US" else "zerodha"
 
 
 @dataclass
@@ -28,15 +33,15 @@ class CostBreakdown:
 
     def __str__(self) -> str:
         return (
-            f"Brokerage:    ₹{self.brokerage:>8.2f}\n"
-            f"STT:          ₹{self.stt:>8.4f}\n"
-            f"Exchange:     ₹{self.exchange_charge:>8.4f}\n"
-            f"SEBI:         ₹{self.sebi_charge:>8.6f}\n"
-            f"Stamp duty:   ₹{self.stamp_duty:>8.4f}\n"
-            f"GST:          ₹{self.gst:>8.4f}\n"
-            f"Slippage:     ₹{self.slippage:>8.2f}\n"
+            f"Brokerage:    {self.brokerage:>8.2f}\n"
+            f"STT:          {self.stt:>8.4f}\n"
+            f"Exchange:     {self.exchange_charge:>8.4f}\n"
+            f"SEBI:         {self.sebi_charge:>8.6f}\n"
+            f"Stamp duty:   {self.stamp_duty:>8.4f}\n"
+            f"GST:          {self.gst:>8.4f}\n"
+            f"Slippage:     {self.slippage:>8.2f}\n"
             f"{'─'*28}\n"
-            f"TOTAL:        ₹{self.total:>8.2f}"
+            f"TOTAL:        {self.total:>8.2f}"
         )
 
 
@@ -50,8 +55,10 @@ class CostModel:
         print(cost)
     """
 
-    def __init__(self, broker: str = "zerodha"):
-        assert broker in ("zerodha", "shoonya"), f"Unknown broker: {broker}"
+    def __init__(self, broker: str = None):
+        broker = broker or _DEF_BROKER
+        valid = [k for k in COST_MODEL if k != "slippage_ticks"]
+        assert broker in valid, f"Unknown broker: {broker}. Valid: {valid}"
         self.broker = broker
         self.c      = COST_MODEL[broker]
         self.s_ticks = COST_MODEL["slippage_ticks"]
@@ -110,7 +117,7 @@ class CostModel:
     ) -> tuple[CostBreakdown, CostBreakdown, float]:
         """
         Full round-trip cost: entry leg + exit leg.
-        Returns (entry_cost, exit_cost, total_cost_inr)
+        Returns (entry_cost, exit_cost, total_cost)
         """
         entry_cost = self.single_leg_cost(symbol, lots, entry_price, is_buy=is_long)
         exit_cost  = self.single_leg_cost(symbol, lots, exit_price,  is_buy=(not is_long))
@@ -161,30 +168,36 @@ class CostModel:
         notional = avg_price * lots * lot_size
 
         return {
-            "cost_per_round_trip_inr":  round(per_trade, 2),
-            "daily_cost_inr":           round(daily_cost, 2),
-            "annual_cost_inr":          round(annual_cost, 2),
-            "annual_cost_pct_notional": round(annual_cost / notional * 100, 4),
+            "cost_per_round_trip":       round(per_trade, 2),
+            "daily_cost":                round(daily_cost, 2),
+            "annual_cost":               round(annual_cost, 2),
+            "annual_cost_pct_notional":  round(annual_cost / notional * 100, 4),
             "breakeven_points":         self.min_points_to_breakeven(symbol, lots, avg_price),
         }
 
 
 # ── Quick sanity-check  ───────────────────────────────────────
 if __name__ == "__main__":
+    from config.settings import MARKET
     print("=" * 50)
     print("COST MODEL SANITY CHECK")
     print("=" * 50)
 
-    for broker in ("zerodha", "shoonya"):
+    brokers_to_check = [k for k in COST_MODEL if k != "slippage_ticks"]
+    for broker in brokers_to_check:
         cm = CostModel(broker=broker)
-        print(f"\n--- {broker.upper()} | BANKNIFTY | 1 lot | entry ₹48,000 ---")
-        entry, exit_, total = cm.round_trip_cost("BANKNIFTY", lots=1, entry_price=48000, exit_price=48150)
+        cur = "$" if broker == "us_paper" else "₹"
+        sym = "SPY" if broker == "us_paper" else "BANKNIFTY"
+        price = 500.0 if broker == "us_paper" else 48000.0
+        exit_p = 502.0 if broker == "us_paper" else 48150.0
+        print(f"\n--- {broker.upper()} | {sym} | 1 lot | entry {cur}{price:,.0f} ---")
+        entry, exit_, total = cm.round_trip_cost(sym, lots=1, entry_price=price, exit_price=exit_p)
         print(f"Entry leg:\n{entry}")
         print(f"\nExit leg:\n{exit_}")
-        print(f"\nTotal round-trip cost: ₹{total}")
-        print(f"Breakeven points needed: {cm.min_points_to_breakeven('BANKNIFTY', 1, 48000)}")
+        print(f"\nTotal round-trip cost: {cur}{total}")
+        print(f"Breakeven points needed: {cm.min_points_to_breakeven(sym, 1, price)}")
 
         print(f"\nAnnual projection (5 trades/day, 250 days):")
-        proj = cm.annual_cost_estimate("BANKNIFTY", 1, 48000, trades_per_day=5)
+        proj = cm.annual_cost_estimate(sym, 1, price, trades_per_day=5)
         for k, v in proj.items():
             print(f"  {k}: {v}")

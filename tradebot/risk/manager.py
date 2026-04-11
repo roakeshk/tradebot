@@ -19,10 +19,12 @@ from dataclasses import dataclass
 from datetime import datetime, date
 from typing import Optional
 
-from config.settings import RISK, INSTRUMENTS
+from config.settings import RISK, INSTRUMENTS, MARKET
 from strategy.base_strategy import Signal, Direction
 
 logger = logging.getLogger(__name__)
+
+_CUR = "$" if MARKET == "US" else "₹"
 
 
 @dataclass
@@ -43,7 +45,7 @@ class RiskManager:
     """
 
     def __init__(self, capital: float = None):
-        self.capital       = capital or RISK["max_capital_inr"]
+        self.capital       = capital or RISK["max_capital"]
         self.initial_cap   = self.capital
         self._daily_pnl:   float = 0.0
         self._trades_today: int  = 0
@@ -56,7 +58,8 @@ class RiskManager:
         self._daily_pnl    = 0.0
         self._trades_today = 0
         self._today        = datetime.now().date()
-        logger.info(f"Risk manager reset for {self._today} | capital=₹{self.capital:,.0f}")
+        cur = _CUR
+        logger.info(f"Risk manager reset for {self._today} | capital={cur}{self.capital:,.0f}")
 
     # ── Update state ──────────────────────────────────────────
 
@@ -87,7 +90,7 @@ class RiskManager:
         # ── Hard stops ────────────────────────────────────────
         max_daily_loss = self.initial_cap * RISK["max_daily_loss_pct"] / 100
         if self._daily_pnl <= -max_daily_loss:
-            return SizeResult(False, 0, f"Daily loss limit hit (₹{-self._daily_pnl:,.0f})")
+            return SizeResult(False, 0, f"Daily loss limit hit ({_CUR}{-self._daily_pnl:,.0f})")
 
         if self._trades_today >= RISK["max_trades_per_day"]:
             return SizeResult(False, 0, f"Max {RISK['max_trades_per_day']} trades/day reached")
@@ -114,14 +117,14 @@ class RiskManager:
         inst     = INSTRUMENTS.get(signal.symbol, {})
         lot_size = inst.get("lot_size", 1)
 
-        max_risk_inr  = self.capital * RISK["max_risk_per_trade_pct"] / 100
+        max_risk_amt  = self.capital * RISK["max_risk_per_trade_pct"] / 100
         risk_per_unit = abs(signal.entry_price - signal.stop_loss)
 
         if risk_per_unit <= 0:
             return 0
 
         risk_per_lot = risk_per_unit * lot_size
-        lots = int(max_risk_inr / risk_per_lot)
+        lots = int(max_risk_amt / risk_per_lot)
         return max(1, min(lots, 5))   # cap at 5 lots
 
     # ── Status ────────────────────────────────────────────────

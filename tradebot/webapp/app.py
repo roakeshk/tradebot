@@ -2,26 +2,8 @@
 #  tradebot / webapp / app.py
 #  Local Flask web application.
 #
-#  What this solves:
-#    Angel One SmartAPI "Add App" form asks for a Redirect URL.
-#    For PERSONAL use with TOTP login, this URL is NEVER called.
-#    But Angel One's form still requires something in the field.
-#    This app runs locally on http://localhost:5000 and:
-#      - Provides a real local URL for the form (http://localhost:5000/callback)
-#      - Serves the live trading dashboard
-#      - Provides REST API endpoints for the trading engine
-#      - Shows system status, logs, and P&L in a browser
-#
-#  How to fill the Angel One form:
-#    App Name:          TradeBot (or anything)
-#    Redirect URL:      http://localhost:5000/callback
-#    Post back URL:     (leave blank)
-#    Primary Static IP: (your public IP — get from: curl ifconfig.me)
-#    Secondary IP:      (leave blank)
-#
-#  To find your public IP:
-#    Open terminal → type: curl ifconfig.me
-#    Copy that IP into the form.
+#  Serves the live trading dashboard with REST API endpoints.
+#  Supports US and India markets via MARKET config toggle.
 #
 #  Running:
 #    python -m webapp.app              (development)
@@ -36,6 +18,13 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from config.settings import INSTRUMENTS, RISK, MARKET, COST_MODEL
+
+_CUR = "$" if MARKET == "US" else "₹"
+_DEF_SYM = list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY"
+_MAX_DD = RISK.get("max_capital", 100000) * RISK.get("max_daily_loss_pct", 3) / 100 * 4
+_LOCALE = "en-US" if MARKET == "US" else "en-IN"
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +41,8 @@ def create_app():
 
     # ── Helper: load latest trade data ───────────────────────
 
-    def _load_trades(symbol="BANKNIFTY"):
+    def _load_trades(symbol=None):
+        symbol = symbol or _DEF_SYM
         import pandas as pd
         proc = BASE / "data" / "processed"
         frames = []
@@ -160,14 +150,14 @@ def create_app():
 
     @app.route("/api/metrics")
     def api_metrics():
-        symbol = request.args.get("symbol", "BANKNIFTY")
+        symbol = request.args.get("symbol", _DEF_SYM)
         trades = _load_trades(symbol)
         metrics = _get_metrics(trades)
         # Gate check
         metrics["gate"] = {
             "win_rate":      metrics["win_rate"] >= 55,
             "profit_factor": metrics["profit_factor"] >= 1.4,
-            "max_drawdown":  abs(metrics["max_drawdown"]) < 12000,
+            "max_drawdown":  abs(metrics["max_drawdown"]) < _MAX_DD,
             "min_trades":    metrics["total_trades"] >= 200,
         }
         metrics["gate"]["all_pass"] = all(metrics["gate"].values())
@@ -175,7 +165,7 @@ def create_app():
 
     @app.route("/api/trades")
     def api_trades():
-        symbol = request.args.get("symbol", "BANKNIFTY")
+        symbol = request.args.get("symbol", _DEF_SYM)
         limit  = int(request.args.get("limit", 50))
         trades = _load_trades(symbol)
         if trades is None:
@@ -190,7 +180,7 @@ def create_app():
 
     @app.route("/api/equity")
     def api_equity():
-        symbol  = request.args.get("symbol", "BANKNIFTY")
+        symbol  = request.args.get("symbol", _DEF_SYM)
         capital = float(request.args.get("capital", 100000))
         trades  = _load_trades(symbol)
         if trades is None or "net_pnl" not in trades.columns:
@@ -303,7 +293,7 @@ canvas{width:100%!important}
     <div class="metric"><div class="lbl">Profit factor</div><div class="val" id="m-pf" style="color:var(--purple,#a78bfa)">—</div><div class="sub">target: ≥1.4</div></div>
     <div class="metric"><div class="lbl">Trades</div><div class="val" id="m-tr" style="color:var(--amber)">—</div><div class="sub">target: ≥200</div></div>
     <div class="metric"><div class="lbl">Sharpe</div><div class="val" id="m-sh">—</div><div class="sub">target: ≥0.8</div></div>
-    <div class="metric"><div class="lbl">Max drawdown</div><div class="val" id="m-dd" style="color:var(--red)">—</div><div class="sub">limit: ₹12,000</div></div>
+    <div class="metric"><div class="lbl">Max drawdown</div><div class="val" id="m-dd" style="color:var(--red)">—</div><div class="sub" id="m-dd-limit">limit: loading...</div></div>
     <div class="metric"><div class="lbl">Expectancy</div><div class="val" id="m-ex">—</div><div class="sub">per trade avg</div></div>
   </div>
 
@@ -341,6 +331,9 @@ canvas{width:100%!important}
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
+const CUR = '""" + _CUR + """';
+const LOCALE = '""" + _LOCALE + """';
+const MAX_DD = """ + str(int(_MAX_DD)) + """;
 let equityChart = null;
 
 async function loadStatus() {
@@ -362,7 +355,7 @@ async function loadStatus() {
 async function loadMetrics() {
   const r = await fetch('/api/metrics');
   const d = await r.json();
-  const fmt = v => v >= 0 ? '₹'+v.toLocaleString('en-IN') : '-₹'+Math.abs(v).toLocaleString('en-IN');
+  const fmt = v => v >= 0 ? CUR+v.toLocaleString(LOCALE) : '-'+CUR+Math.abs(v).toLocaleString(LOCALE);
   document.getElementById('m-pnl').textContent = fmt(d.total_pnl);
   document.getElementById('m-wr').textContent  = d.win_rate + '%';
   document.getElementById('m-pf').textContent  = d.profit_factor;
@@ -371,11 +364,13 @@ async function loadMetrics() {
   document.getElementById('m-dd').textContent  = fmt(d.max_drawdown);
   document.getElementById('m-ex').textContent  = fmt(d.expectancy);
 
+  document.getElementById('m-dd-limit').textContent = 'limit: ' + CUR + MAX_DD.toLocaleString(LOCALE);
+
   const g = d.gate;
   const gates = [
     { label: 'Win rate ≥55% (' + document.getElementById('m-wr').textContent + ')', pass: g.win_rate },
     { label: 'Profit factor ≥1.4 (' + d.profit_factor + ')', pass: g.profit_factor },
-    { label: 'Max DD <₹12,000', pass: g.max_drawdown },
+    { label: 'Max DD <'+CUR+MAX_DD.toLocaleString(LOCALE), pass: g.max_drawdown },
     { label: 'Trades ≥200 (' + d.total_trades + ')', pass: g.min_trades },
   ];
   document.getElementById('gate-grid').innerHTML = gates.map(gi =>
@@ -397,7 +392,7 @@ async function loadEquity() {
   equityChart = new Chart(ctx, {
     type: 'line',
     data: { labels, datasets: [{ label:'Equity', data: d.equity, borderColor: color, borderWidth:2, fill:true, backgroundColor: color+'22', tension:.3, pointRadius:0, pointHoverRadius:3 }] },
-    options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false} }, scales:{ x:{display:false}, y:{ ticks:{ color:'#8892a4', callback:v=>'₹'+v.toLocaleString('en-IN') }, grid:{color:'#2a3245'} } } }
+    options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false} }, scales:{ x:{display:false}, y:{ ticks:{ color:'#8892a4', callback:v=>CUR+v.toLocaleString(LOCALE) }, grid:{color:'#2a3245'} } } }
   });
 }
 
@@ -414,10 +409,10 @@ async function loadTrades() {
       <td style="color:var(--muted)">${ts}</td>
       <td>${t.strategy||'-'}</td>
       <td style="color:${(t.direction||'').includes('LONG')?'var(--green)':'var(--red)'}">${t.direction||'-'}</td>
-      <td>₹${parseFloat(t.entry_price||0).toFixed(0)}</td>
-      <td>₹${parseFloat(t.exit_price||0).toFixed(0)}</td>
+      <td>${CUR}${parseFloat(t.entry_price||0).toFixed(0)}</td>
+      <td>${CUR}${parseFloat(t.exit_price||0).toFixed(0)}</td>
       <td style="color:var(--muted)">${t.exit_reason||'-'}</td>
-      <td style="color:${win?'var(--green)':'var(--red)'}">${win?'+':''}₹${pnl.toFixed(0)}</td>
+      <td style="color:${win?'var(--green)':'var(--red)'}">${win?'+':''}${CUR}${pnl.toFixed(0)}</td>
       <td><span class="badge ${win?'win':'loss'}">${win?'WIN':'LOSS'}</span></td>
     </tr>`;
   }).join('');
@@ -436,7 +431,7 @@ async function loadLogs() {
 }
 
 async function loadAll() {
-  document.getElementById('last-update').textContent = 'Updated: ' + new Date().toLocaleTimeString('en-IN');
+  document.getElementById('last-update').textContent = 'Updated: ' + new Date().toLocaleTimeString(LOCALE);
   await Promise.all([loadStatus(), loadMetrics(), loadEquity(), loadTrades(), loadLogs()]);
 }
 
@@ -449,43 +444,64 @@ setInterval(loadAll, 30000);
 
 # ── Setup guide HTML ──────────────────────────────────────────
 
-SETUP_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>TradeBot — Setup Guide</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#0f1117;color:#e2e8f0;font-family:-apple-system,sans-serif;font-size:14px;line-height:1.7}
-.nav{background:#161b27;border-bottom:1px solid #2a3245;padding:0 24px;display:flex;align-items:center;gap:24px;height:52px}
-.nav-brand{font-size:1.1rem;font-weight:700;color:#2dd4bf}
-.nav a{color:#8892a4;text-decoration:none;font-size:13px}
-.nav a:hover{color:#e2e8f0}
-.page{max-width:800px;margin:0 auto;padding:36px 24px}
-h1{font-size:1.6rem;font-weight:700;margin-bottom:6px}
-h2{font-size:1.1rem;font-weight:600;color:#2dd4bf;margin:32px 0 12px}
-p,li{color:#8892a4;margin-bottom:8px}
-li{margin-left:20px}
-.step{background:#161b27;border:1px solid #2a3245;border-radius:10px;padding:20px;margin-bottom:16px;position:relative;padding-left:60px}
-.step-num{position:absolute;left:18px;top:18px;width:28px;height:28px;border-radius:50%;background:#0d3330;border:1.5px solid #2dd4bf;color:#2dd4bf;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center}
-.step h3{font-size:.95rem;font-weight:600;margin-bottom:6px;color:#e2e8f0}
-pre,code{background:#1e2536;border-radius:6px;font-family:monospace;color:#2dd4bf}
-pre{padding:12px 14px;overflow-x:auto;margin:10px 0;font-size:12.5px;border:1px solid #2a3245}
-code{padding:2px 6px;font-size:12px}
-.callout{background:#3d2e0a;border:1px solid #fbbf24;border-radius:8px;padding:14px 18px;margin:16px 0}
-.callout strong{color:#fbbf24;display:block;margin-bottom:4px;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
-.ip-box{background:#161b27;border:1px solid #2dd4bf;border-radius:8px;padding:16px;margin:12px 0;text-align:center}
-.ip-val{font-size:1.4rem;font-weight:700;color:#2dd4bf;font-family:monospace}
-</style>
-</head>
-<body>
-<nav class="nav">
-  <span class="nav-brand">TradeBot</span>
-  <a href="/">Dashboard</a>
-  <a href="/setup-guide">Setup Guide</a>
-</nav>
-<div class="page">
+_SETUP_GUIDE_US = """
+  <h1>Setup Guide</h1>
+  <p>Complete reference for setting up TradeBot for US markets.</p>
+
+  <h2>Broker Configuration</h2>
+  <div class="step">
+    <div class="step-num">1</div>
+    <h3>Choose a data source</h3>
+    <p>TradeBot supports multiple US brokers and data sources. Configure your API keys in <code>.env</code>:</p>
+    <pre># .env file in project root
+MARKET=US
+TRADEBOT_KEY=your_encryption_key
+
+# Alpaca (paper + live)
+ALPACA_API_KEY=your_key
+ALPACA_API_SECRET=your_secret
+
+# Interactive Brokers (TWS or Gateway)
+IB_HOST=127.0.0.1
+IB_PORT=7497</pre>
+  </div>
+
+  <div class="step">
+    <div class="step-num">2</div>
+    <h3>No broker? Use simulation mode</h3>
+    <p>TradeBot works <strong>without any broker API</strong> in simulation mode. It uses cached historical data and Black-Scholes option chains.</p>
+    <pre># Run full simulation (futures + options)
+python main.py --mode simulate --symbol SPY --days 90
+
+# Options-only backtest
+python main.py --mode options-sim --symbol SPY --days 60</pre>
+  </div>
+
+  <div class="step">
+    <div class="step-num">3</div>
+    <h3>Download historical data</h3>
+    <pre># Fetch data for configured instruments
+python setup.py
+
+# Or specify a symbol
+python setup.py --symbol SPY</pre>
+  </div>
+
+  <div class="step">
+    <div class="step-num">4</div>
+    <h3>Run the system</h3>
+    <pre># Terminal 1: Start the trading engine (paper mode)
+python main.py --mode paper --symbol SPY
+
+# Terminal 2: Start this dashboard
+python -m webapp.app
+
+# Terminal 3: (optional) Streamlit dashboard
+streamlit run monitor/dashboard.py</pre>
+  </div>
+"""
+
+_SETUP_GUIDE_INDIA = """
   <h1>Setup Guide</h1>
   <p>Complete reference for setting up TradeBot with Angel One SmartAPI — step by step.</p>
 
@@ -575,13 +591,58 @@ streamlit run monitor/dashboard.py</pre>
 5. Run: python generate_token.py  (requires browser once/day)
    OR set ACTIVE_BROKER = "angel" to use Angel for both data + execution</pre>
   </div>
-</div>
+"""
 
+_SETUP_BODY = _SETUP_GUIDE_US if MARKET == "US" else _SETUP_GUIDE_INDIA
+_SETUP_IP_SCRIPT = """
 <script>
 fetch('/api/ip').then(r=>r.json()).then(d=>{
-  document.getElementById('pub-ip').textContent = d.public_ip;
+  const el = document.getElementById('pub-ip');
+  if (el) el.textContent = d.public_ip;
 });
 </script>
+""" if MARKET != "US" else ""
+
+SETUP_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TradeBot — Setup Guide</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f1117;color:#e2e8f0;font-family:-apple-system,sans-serif;font-size:14px;line-height:1.7}
+.nav{background:#161b27;border-bottom:1px solid #2a3245;padding:0 24px;display:flex;align-items:center;gap:24px;height:52px}
+.nav-brand{font-size:1.1rem;font-weight:700;color:#2dd4bf}
+.nav a{color:#8892a4;text-decoration:none;font-size:13px}
+.nav a:hover{color:#e2e8f0}
+.page{max-width:800px;margin:0 auto;padding:36px 24px}
+h1{font-size:1.6rem;font-weight:700;margin-bottom:6px}
+h2{font-size:1.1rem;font-weight:600;color:#2dd4bf;margin:32px 0 12px}
+p,li{color:#8892a4;margin-bottom:8px}
+li{margin-left:20px}
+.step{background:#161b27;border:1px solid #2a3245;border-radius:10px;padding:20px;margin-bottom:16px;position:relative;padding-left:60px}
+.step-num{position:absolute;left:18px;top:18px;width:28px;height:28px;border-radius:50%;background:#0d3330;border:1.5px solid #2dd4bf;color:#2dd4bf;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.step h3{font-size:.95rem;font-weight:600;margin-bottom:6px;color:#e2e8f0}
+pre,code{background:#1e2536;border-radius:6px;font-family:monospace;color:#2dd4bf}
+pre{padding:12px 14px;overflow-x:auto;margin:10px 0;font-size:12.5px;border:1px solid #2a3245}
+code{padding:2px 6px;font-size:12px}
+.callout{background:#3d2e0a;border:1px solid #fbbf24;border-radius:8px;padding:14px 18px;margin:16px 0}
+.callout strong{color:#fbbf24;display:block;margin-bottom:4px;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+.ip-box{background:#161b27;border:1px solid #2dd4bf;border-radius:8px;padding:16px;margin:12px 0;text-align:center}
+.ip-val{font-size:1.4rem;font-weight:700;color:#2dd4bf;font-family:monospace}
+</style>
+</head>
+<body>
+<nav class="nav">
+  <span class="nav-brand">TradeBot</span>
+  <a href="/">Dashboard</a>
+  <a href="/setup-guide">Setup Guide</a>
+</nav>
+<div class="page">
+""" + _SETUP_BODY + """
+</div>
+""" + _SETUP_IP_SCRIPT + """
 </body>
 </html>
 """
@@ -606,8 +667,7 @@ if __name__ == "__main__":
     print(f"  Setup guide:  http://localhost:{args.port}/setup-guide")
     print(f"  API callback: http://localhost:{args.port}/callback")
     print(f"{'='*55}\n")
-    print("  Use http://localhost:5000/callback as Redirect URL in Angel One form.")
-    print("  Use the Setup Guide page to get your public IP for the Static IP field.\n")
+    print(f"  Use the Setup Guide page for broker configuration.\n")
 
     app = create_app()
     app.run(host=args.host, port=args.port, debug=False)

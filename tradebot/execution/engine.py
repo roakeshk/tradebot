@@ -36,7 +36,19 @@ from ai.classifier import MultiStrategyClassifier
 from alerts.notifier import Notifier
 from utils.railway_push import get_pusher
 from utils.logger import setup_logging
-from config.settings import RISK, SESSION, PRIMARY_TF, INSTRUMENTS, ACTIVE_BROKER
+from config.settings import RISK, SESSION, PRIMARY_TF, INSTRUMENTS, ACTIVE_BROKER, MARKET
+
+
+# Parse session times once at import
+def _parse_session_time(time_str: str) -> int:
+    """Convert 'HH:MM' to minutes-since-midnight."""
+    h, m = map(int, time_str.split(":"))
+    return h * 60 + m
+
+_MARKET_OPEN  = _parse_session_time(SESSION["market_open"])
+_MARKET_CLOSE = _parse_session_time(SESSION["market_close"])
+_NO_TRADE     = _parse_session_time(SESSION["no_trade_after"])
+_FIRST_END    = _parse_session_time(SESSION["first_candle_end"])
 
 logger = logging.getLogger(__name__)
 
@@ -52,14 +64,15 @@ class ExecutionEngine:
 
     def __init__(
         self,
-        symbol:       str   = "BANKNIFTY",
+        symbol:       str   = None,
         timeframe:    str   = "5min",
         capital:      float = None,
         use_ai:       bool  = True,
         ai_threshold: float = 0.55,
         broker_name:  str   = None,
     ):
-        self.symbol     = symbol
+        _def_sym = list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY"
+        self.symbol     = symbol or _def_sym
         self.timeframe  = timeframe
         self.use_ai     = use_ai
         self.broker_name = broker_name or ACTIVE_BROKER
@@ -71,7 +84,8 @@ class ExecutionEngine:
         self.strategies = build_strategies(symbol)
         self.regime_clf = RegimeClassifier()
         self.risk       = RiskManager(capital)
-        self.cost       = CostModel(self.broker_name if self.broker_name != "paper" else "zerodha")
+        cost_key = self.broker_name if self.broker_name != "paper" else ("us_paper" if MARKET == "US" else "zerodha")
+        self.cost       = CostModel(cost_key)
         self.notifier   = Notifier()
         self.pusher     = get_pusher()
 
@@ -91,7 +105,7 @@ class ExecutionEngine:
         self._log_dir.mkdir(parents=True, exist_ok=True)
 
         inst     = INSTRUMENTS.get(symbol, {})
-        self._lot_size = inst.get("lot_size", 15)
+        self._lot_size = inst.get("lot_size", 1 if MARKET == "US" else 15)
 
         ai_status = "ON" if (use_ai and self.ai and self.ai.all_trained()) else "OFF (not trained)"
         logger.info(
@@ -114,10 +128,11 @@ class ExecutionEngine:
         self.risk.reset_day()
 
         mode = "PAPER" if self.broker_name == "paper" else "LIVE"
-        logger.info(f"Engine started [{mode}] | capital=₹{self.risk.capital:,.0f}")
+        cur = "$" if MARKET == "US" else "₹"
+        logger.info(f"Engine started [{mode}] | capital={cur}{self.risk.capital:,.0f}")
         self.notifier.send(
-            f"🟢 TradeBot started [{mode}]\n"
-            f"Symbol: {self.symbol} | Capital: ₹{self.risk.capital:,.0f}"
+            f"TradeBot started [{mode}]\n"
+            f"Symbol: {self.symbol} | Capital: {cur}{self.risk.capital:,.0f}"
         )
 
         try:
@@ -135,10 +150,11 @@ class ExecutionEngine:
         self.broker.disconnect()
 
         summary = self.risk.status()
-        logger.info(f"Engine stopped | daily P&L=₹{summary['daily_pnl']:,.0f}")
+        cur = "$" if MARKET == "US" else "₹"
+        logger.info(f"Engine stopped | daily P&L={cur}{summary['daily_pnl']:,.0f}")
         self.notifier.send(
-            f"🔴 TradeBot stopped\n"
-            f"Daily P&L: ₹{summary['daily_pnl']:,.0f} | "
+            f"TradeBot stopped\n"
+            f"Daily P&L: {cur}{summary['daily_pnl']:,.0f} | "
             f"Trades: {summary['trades_today']}"
         )
 
@@ -298,17 +314,18 @@ class ExecutionEngine:
             "ai_score":    ai_score,
         }
 
+        cur = "$" if MARKET == "US" else "₹"
         bep = self.cost.min_points_to_breakeven(self.symbol, lots, signal.entry_price)
         logger.info(
             f"  [ORDER] {signal.strategy} {signal.direction.value} "
-            f"qty={quantity} entry={signal.entry_price:.0f} "
-            f"SL={signal.stop_loss:.0f} T={signal.target:.0f} "
+            f"qty={quantity} entry={signal.entry_price:.2f} "
+            f"SL={signal.stop_loss:.2f} T={signal.target:.2f} "
             f"RR={signal.rr_ratio:.2f} lots={lots} BEP={bep:.1f}pts"
         )
         self.notifier.send(
-            f"📊 {signal.strategy} {signal.direction.value}\n"
-            f"Entry: ₹{signal.entry_price:.0f} | SL: ₹{signal.stop_loss:.0f} | "
-            f"T: ₹{signal.target:.0f} | R:R {signal.rr_ratio:.1f}\n"
+            f"{signal.strategy} {signal.direction.value}\n"
+            f"Entry: {cur}{signal.entry_price:.2f} | SL: {cur}{signal.stop_loss:.2f} | "
+            f"T: {cur}{signal.target:.2f} | R:R {signal.rr_ratio:.1f}\n"
             f"Lots: {lots} | AI: {ai_score:.2f}"
         )
 
@@ -353,15 +370,16 @@ class ExecutionEngine:
             self.risk.record_close(net_pnl)
             del self._open_trades[order_id]
 
-            emoji = "✅" if net_pnl > 0 else "❌"
+            cur = "$" if MARKET == "US" else "₹"
+            emoji = "+" if net_pnl > 0 else "-"
             logger.info(
-                f"  [{exit_reason}] @ ₹{exit_price:.0f} | "
-                f"gross=₹{raw_pnl:,.0f} cost=₹{cost:.0f} net=₹{net_pnl:,.0f}"
+                f"  [{exit_reason}] @ {cur}{exit_price:.2f} | "
+                f"gross={cur}{raw_pnl:,.2f} cost={cur}{cost:.2f} net={cur}{net_pnl:,.2f}"
             )
             self.notifier.send(
                 f"{emoji} {exit_reason} — {sig.strategy}\n"
-                f"Exit: ₹{exit_price:.0f} | Net P&L: ₹{net_pnl:,.0f}\n"
-                f"Daily P&L: ₹{self.risk.daily_pnl:,.0f}"
+                f"Exit: {cur}{exit_price:.2f} | Net P&L: {cur}{net_pnl:,.2f}\n"
+                f"Daily P&L: {cur}{self.risk.daily_pnl:,.2f}"
             )
 
     def _close_all_positions(self, reason: str) -> None:
@@ -390,7 +408,7 @@ class ExecutionEngine:
         self._today = now.date()
         self.risk.reset_day()
         logger.info(f"New trading day: {self._today}")
-        self.notifier.send(f"🌅 New day: {self._today} | Capital: ₹{self.risk.capital:,.0f}")
+        self.notifier.send(f"New day: {self._today} | Capital: {('$' if MARKET == 'US' else '₹')}{self.risk.capital:,.0f}")
 
     def _load_warmup_data(self) -> None:
         logger.info("Loading warm-up window...")
@@ -419,14 +437,14 @@ class ExecutionEngine:
     @staticmethod
     def _is_market_hours(now: datetime) -> bool:
         t = now.hour * 60 + now.minute
-        return 9 * 60 + 15 <= t <= 15 * 60 + 30
+        return _MARKET_OPEN <= t <= _MARKET_CLOSE
 
     @staticmethod
     def _is_eod(now: datetime) -> bool:
         t = now.hour * 60 + now.minute
-        return t >= 15 * 60 + 15
+        return t >= _NO_TRADE
 
     @staticmethod
     def _is_no_trade_zone(ts: datetime) -> bool:
         t = ts.hour * 60 + ts.minute
-        return t < 9 * 60 + 30 or t > 15 * 60 + 10
+        return t < _FIRST_END or t > _NO_TRADE

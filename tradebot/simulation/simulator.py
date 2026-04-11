@@ -32,6 +32,7 @@ import numpy as np
 from data.pipeline    import DataPipeline
 from options.chain_feed import ChainFeed
 from options.pricing  import BSModel
+from config.settings   import INSTRUMENTS, SESSION
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ class MarketSimulator:
     Replays historical market data as a live feed.
 
     Usage:
-        sim = MarketSimulator("BANKNIFTY", mode=SimMode.PAPER_SIM)
+        sim = MarketSimulator("SPY", mode=SimMode.PAPER_SIM)
         sim.on_bar(my_strategy_callback)
         sim.on_bar(my_options_callback)
         result = sim.run(from_date="2025-01-01", to_date="2025-06-30")
@@ -105,13 +106,13 @@ class MarketSimulator:
 
     def __init__(
         self,
-        symbol:      str = "BANKNIFTY",
+        symbol:      str = None,
         timeframe:   str = "5min",
         mode:        SimMode = SimMode.PAPER_SIM,
         speed:       float = 0,           # 0 = max speed, 1.0 = realtime
         capital:     float = 100000.0,
     ):
-        self.symbol    = symbol
+        self.symbol    = symbol or (list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY")
         self.timeframe = timeframe
         self.mode      = mode
         self.speed     = speed
@@ -212,8 +213,10 @@ class MarketSimulator:
 
             # Build SimBar
             iv_est  = self._estimate_iv(ts, df.iloc[max(0,i-20):i])
-            session_mins = (ts.hour * 60 + ts.minute) - (9 * 60 + 15)
-            total_mins   = (15 * 60 + 30) - (9 * 60 + 15)
+            _oh, _om = map(int, SESSION["market_open"].split(":"))
+            _ch, _cm = map(int, SESSION["market_close"].split(":"))
+            session_mins = (ts.hour * 60 + ts.minute) - (_oh * 60 + _om)
+            total_mins   = (_ch * 60 + _cm) - (_oh * 60 + _om)
 
             sim_bar = SimBar(
                 timestamp   = ts,

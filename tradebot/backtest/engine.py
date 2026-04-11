@@ -30,7 +30,7 @@ import numpy as np
 from strategy.base_strategy import StrategyBase, Signal, Direction
 from strategy.regime import RegimeClassifier
 from risk.cost_model import CostModel
-from config.settings import RISK, INSTRUMENTS
+from config.settings import RISK, INSTRUMENTS, SESSION, MARKET
 
 logger = logging.getLogger(__name__)
 
@@ -108,26 +108,28 @@ class BacktestResult:
         self.max_drawdown = round(abs(drawdown.min()), 2)
 
         # Gate check — minimum requirements to proceed to paper trading
+        dd_limit = RISK["max_capital"] * (RISK["max_drawdown_pct"] / 100)
         self.passed_gate = (
             self.total_trades >= 200 and       # enough sample size
             self.win_rate >= 55.0 and          # minimum win rate
             self.profit_factor >= 1.4 and      # profit factor
-            self.max_drawdown < 12000 and      # max drawdown < ₹12,000
+            self.max_drawdown < dd_limit and   # max drawdown relative to capital
             self.expectancy > 0                # positive expectancy
         )
 
     def summary(self) -> str:
         gate = "PASS" if self.passed_gate else "FAIL"
         oos  = "OOS" if self.is_oos else "IS "
+        cur  = "$" if MARKET == "US" else "₹"
         return (
             f"[{oos}] {self.strategy:30s} | "
             f"Trades:{self.total_trades:4d} | "
             f"WR:{self.win_rate:5.1f}% | "
             f"PF:{self.profit_factor:5.2f} | "
             f"Sharpe:{self.sharpe:5.2f} | "
-            f"MaxDD:₹{self.max_drawdown:8,.0f} | "
-            f"NetPnL:₹{self.total_net_pnl:9,.0f} | "
-            f"Expect:₹{self.expectancy:6.0f} | "
+            f"MaxDD:{cur}{self.max_drawdown:8,.0f} | "
+            f"NetPnL:{cur}{self.total_net_pnl:9,.0f} | "
+            f"Expect:{cur}{self.expectancy:6.0f} | "
             f"[{gate}]"
         )
 
@@ -137,9 +139,9 @@ class BacktestEngine:
     Bar-by-bar backtesting engine with full cost model.
 
     Usage:
-        engine = BacktestEngine(symbol="BANKNIFTY", lots=1)
+        engine = BacktestEngine(symbol="SPY", lots=1)
         from strategy.strategies import VWAPReversion
-        strategy = VWAPReversion("BANKNIFTY")
+        strategy = VWAPReversion("SPY")
         result = engine.run(df, strategy)
         print(result.summary())
     """
@@ -148,9 +150,11 @@ class BacktestEngine:
         self,
         symbol:     str,
         lots:       int = 1,
-        broker:     str = "zerodha",
+        broker:     str = None,
         warmup_bars: int = 50,   # bars needed before first signal attempt
     ):
+        if broker is None:
+            broker = "us_paper" if MARKET == "US" else "zerodha"
         self.symbol      = symbol
         self.lots        = lots
         self.cost_model  = CostModel(broker)
@@ -293,11 +297,13 @@ class BacktestEngine:
                 exit_price  = tgt
                 exit_reason = "target"
 
-        # End-of-session exit (15:15 IST)
+        # End-of-session exit (config-driven)
         if exit_price is None:
             try:
                 h, m = bar.name.hour, bar.name.minute
-                if h * 60 + m >= 15 * 60 + 15:
+                _nta = SESSION.get("no_trade_after", "15:15")
+                _h, _m = map(int, _nta.split(":"))
+                if h * 60 + m >= _h * 60 + _m:
                     exit_price  = bar["close"]
                     exit_reason = "time_exit"
             except AttributeError:
@@ -370,13 +376,13 @@ class WalkForwardRunner:
         self,
         symbol:      str,
         lots:        int = 1,
-        broker:      str = "zerodha",
+        broker:      str = None,
         in_sample_months:  int = 6,
         oos_months:        int = 1,
     ):
         self.symbol = symbol
         self.lots   = lots
-        self.broker = broker
+        self.broker = broker or ("us_paper" if MARKET == "US" else "zerodha")
         self.in_months  = in_sample_months
         self.oos_months = oos_months
 

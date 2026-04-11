@@ -15,7 +15,7 @@ from broker.base import (
     BrokerBase, Order, Position, AccountInfo,
     OrderSide, OrderType, OrderStatus
 )
-from config.settings import RISK, COST_MODEL
+from config.settings import RISK, COST_MODEL, INSTRUMENTS, MARKET
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class PaperBroker(BrokerBase):
     """
 
     def __init__(self, initial_capital: float = None, cost_model: str = "zerodha"):
-        self.capital    = initial_capital or RISK["max_capital_inr"]
+        self.capital    = initial_capital or RISK["max_capital"]
         self.cost_key   = cost_model
         self.costs      = COST_MODEL[cost_model]
         self.slippage_t = COST_MODEL["slippage_ticks"]
@@ -49,7 +49,8 @@ class PaperBroker(BrokerBase):
         self._ltp:       dict[str, float]    = {}    # symbol -> last price
         self._callbacks: list[Callable]      = []
 
-        logger.info(f"PaperBroker initialised | capital=₹{self.capital:,.0f} | costs={cost_model}")
+        cur = "$" if MARKET == "US" else "₹"
+        logger.info(f"PaperBroker initialised | capital={cur}{self.capital:,.0f} | costs={cost_model}")
 
     # ── Connection ────────────────────────────────────────────
 
@@ -107,7 +108,8 @@ class PaperBroker(BrokerBase):
             return
 
         # Apply slippage — adverse for us (buy higher, sell lower)
-        tick = 0.05   # BankNifty tick size
+        inst = INSTRUMENTS.get(order.symbol, {})
+        tick = inst.get("tick_size", 0.01)
         slip = self.slippage_t * tick
         if order.side == OrderSide.BUY:
             fill_price = ltp + slip
@@ -126,9 +128,10 @@ class PaperBroker(BrokerBase):
         # Update positions
         self._update_position(order)
 
+        cur = "$" if MARKET == "US" else "₹"
         logger.info(
             f"[PAPER] FILLED {order.order_id} | {order.side.value} {order.quantity} "
-            f"{order.symbol} @ ₹{fill_price:.2f} | cost=₹{cost:.2f}"
+            f"{order.symbol} @ {cur}{fill_price:.2f} | cost={cur}{cost:.2f}"
         )
 
         self._trade_log.append({
@@ -195,7 +198,8 @@ class PaperBroker(BrokerBase):
 
                 if order.quantity >= pos.quantity:
                     del self._positions[sym]
-                    logger.info(f"[PAPER] Position closed {sym} | pnl=₹{pnl:.2f}")
+                    cur = "$" if MARKET == "US" else "₹"
+                    logger.info(f"[PAPER] Position closed {sym} | pnl={cur}{pnl:.2f}")
                 else:
                     pos.quantity -= order.quantity
         else:
@@ -236,10 +240,11 @@ class PaperBroker(BrokerBase):
 
         total = brokerage + stt + exchange_charge + sebi_charge + stamp_duty + gst
 
+        cur = "$" if MARKET == "US" else "₹"
         logger.debug(
             f"Cost breakdown: brok={brokerage:.2f} stt={stt:.4f} "
             f"exc={exchange_charge:.4f} sebi={sebi_charge:.6f} "
-            f"stamp={stamp_duty:.4f} gst={gst:.4f} → total=₹{total:.2f}"
+            f"stamp={stamp_duty:.4f} gst={gst:.4f} → total={cur}{total:.2f}"
         )
         return total
 

@@ -27,6 +27,7 @@ import pandas as pd
 
 from options.data import OptionChain, _get_iv_rank
 from options.signals import OptionsSignal
+from config.settings import INSTRUMENTS, MARKET
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ class OptionsFeatureBuilder:
         features["dte_gt15"]         = float(dte > 15)
 
         # ── IV skew features ──────────────────────────────────
-        step = 100 if chain.symbol == "BANKNIFTY" else 50
+        step = INSTRUMENTS.get(chain.symbol, {}).get("strike_step", 1 if MARKET == "US" else 100)
         otm_c = chain.df[chain.df["strike"] > chain.atm + 2*step]["ce_iv"]
         otm_p = chain.df[chain.df["strike"] < chain.atm - 2*step]["pe_iv"]
         if not otm_c.empty and not otm_p.empty:

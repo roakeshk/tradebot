@@ -27,8 +27,14 @@ from options.risk        import OptionsRiskManager
 from options.pricing     import BSModel
 from options.data        import ExpiryManager, OptionChain
 from risk.cost_model     import CostModel
-from config.settings     import PROC_DIR
+from config.settings     import PROC_DIR, INSTRUMENTS, SESSION, MARKET, COST_MODEL
 from utils.railway_push  import get_pusher
+
+def _parse_time(t: str) -> int:
+    h, m = map(int, t.split(":"))
+    return h * 60 + m
+
+_CURRENCY = "$" if MARKET == "US" else "Rs."
 
 logger = logging.getLogger(__name__)
 
@@ -81,17 +87,18 @@ class OptionsPaperRunner:
 
     def __init__(
         self,
-        symbol:      str   = "BANKNIFTY",
+        symbol:      str   = None,
         capital:     float = 100000.0,
-        broker_name: str   = "zerodha",
+        broker_name: str   = None,
     ):
-        self.symbol      = symbol
+        self.symbol      = symbol or (list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY")
         self.capital     = capital
         self.initial_cap = capital
 
+        _broker = broker_name or ("us_paper" if MARKET == "US" else "zerodha")
         self._builder    = OptionsStrategyBuilder()
         self._risk       = OptionsRiskManager(capital)
-        self._cost       = CostModel(broker_name)
+        self._cost       = CostModel(_broker)
         self._sig_engine = OptionsSignalEngine()
 
         self._open: list[tuple[PaperTrade, OptionsPosition]] = []
@@ -115,10 +122,12 @@ class OptionsPaperRunner:
         self._daily_reset(ts)
         self._manage_open_positions(chain, spot, ts)
 
-        # Session time filter
+        # Session time filter (config-driven)
         h, m = ts.hour, ts.minute
         mins = h * 60 + m
-        if mins < 9 * 60 + 30 or mins > 15 * 60 + 10:
+        mkt_open  = _parse_time(SESSION["market_open"])
+        no_trade  = _parse_time(SESSION["no_trade_after"])
+        if mins < mkt_open or mins > no_trade:
             return
 
         # Don't add new positions if at max
@@ -193,7 +202,7 @@ class OptionsPaperRunner:
 
         logger.info(
             f"[OPTIONS PAPER] ENTER #{trade.trade_id} {position.strategy_name} "
-            f"spot={chain.spot:.0f} prem=Rs.{position.net_premium:.0f} "
+            f"spot={chain.spot:.0f} prem={_CURRENCY}{position.net_premium:.0f} "
             f"DTE={dte} IV_rank={chain.iv_rank:.0f}"
         )
 
@@ -208,8 +217,9 @@ class OptionsPaperRunner:
             # Check exit conditions
             should_exit, reason = position.should_exit(chain)
 
-            # Also check for EOD
-            if ts.hour * 60 + ts.minute >= 15 * 60 + 15:
+            # Also check for EOD (config-driven)
+            _nta = _parse_time(SESSION.get("no_trade_after", "15:15"))
+            if ts.hour * 60 + ts.minute >= _nta:
                 should_exit = True
                 reason      = "EOD"
 
@@ -231,13 +241,15 @@ class OptionsPaperRunner:
         curr_pnl: float,
     ) -> None:
         # Estimate transaction cost (one round trip per leg)
+        _broker_key = "us_paper" if MARKET == "US" else "zerodha"
+        _brokerage = COST_MODEL.get(_broker_key, {}).get("brokerage_per_order", 0.0)
+        _stt = COST_MODEL.get(_broker_key, {}).get("stt_pct_sell", 0.0001)
         leg_cost = 0.0
         for leg in position.legs:
             notional = spot * leg.quantity
-            # Simplified: brokerage + STT on sell legs
-            leg_cost += 20.0   # flat ₹20 brokerage per leg
+            leg_cost += _brokerage
             if leg.action == "sell":
-                leg_cost += notional * 0.0001   # STT on sell side
+                leg_cost += notional * _stt
 
         trade.exit_time   = ts
         trade.exit_spot   = spot
@@ -259,8 +271,8 @@ class OptionsPaperRunner:
         emoji = "✓" if trade.net_pnl > 0 else "✗"
         logger.info(
             f"[OPTIONS PAPER] EXIT {emoji} #{trade.trade_id} {trade.strategy} "
-            f"reason={reason} gross=Rs.{curr_pnl:.0f} "
-            f"cost=Rs.{leg_cost:.0f} net=Rs.{trade.net_pnl:.0f}"
+            f"reason={reason} gross={_CURRENCY}{curr_pnl:.0f} "
+            f"cost={_CURRENCY}{leg_cost:.0f} net={_CURRENCY}{trade.net_pnl:.0f}"
         )
 
     def _daily_reset(self, ts: datetime) -> None:
@@ -288,26 +300,27 @@ class OptionsPaperRunner:
         print(f"{'='*55}")
         print(f" Total trades:    {n}")
         print(f" Win rate:        {len(wins)/n*100:.1f}%")
-        print(f" Total net P&L:   Rs.{sum(pnls):,.0f}")
-        print(f" Avg win:         Rs.{(sum(wins)/len(wins) if wins else 0):,.0f}")
-        print(f" Avg loss:        Rs.{(sum(loss)/len(loss) if loss else 0):,.0f}")
+        print(f" Total net P&L:   {_CURRENCY}{sum(pnls):,.0f}")
+        print(f" Avg win:         {_CURRENCY}{(sum(wins)/len(wins) if wins else 0):,.0f}")
+        print(f" Avg loss:        {_CURRENCY}{(sum(loss)/len(loss) if loss else 0):,.0f}")
         if loss:
             print(f" Profit factor:   {sum(wins)/abs(sum(loss)):.2f}")
-        print(f" Capital:         Rs.{self.capital:,.0f} (start: Rs.{self.initial_cap:,.0f})")
+        print(f" Capital:         {_CURRENCY}{self.capital:,.0f} (start: {_CURRENCY}{self.initial_cap:,.0f})")
         print(f"\n Strategy breakdown:")
         by_strat: dict[str, list] = {}
         for t in trades:
             by_strat.setdefault(t.strategy, []).append(t.net_pnl)
         for strat, spnls in sorted(by_strat.items()):
             wr = sum(1 for p in spnls if p > 0) / len(spnls) * 100
-            print(f"   {strat:22s}: {len(spnls):3d} trades  WR={wr:.0f}%  PnL=Rs.{sum(spnls):,.0f}")
+            print(f"   {strat:22s}: {len(spnls):3d} trades  WR={wr:.0f}%  PnL={_CURRENCY}{sum(spnls):,.0f}")
 
     def get_trades_df(self) -> pd.DataFrame:
         if not self._closed:
             return pd.DataFrame()
         return pd.DataFrame([vars(t) for t in self._closed])
 
-    def save_trades(self, symbol: str = "BANKNIFTY") -> None:
+    def save_trades(self, symbol: str = None) -> None:
+        symbol = symbol or self.symbol
         df = self.get_trades_df()
         if df.empty:
             return

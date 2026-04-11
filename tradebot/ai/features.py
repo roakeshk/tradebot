@@ -22,6 +22,7 @@ from strategy.indicators import (
     bollinger_bands, volume_delta, cvd, trend_strength,
     opening_range, stochastic, obv, keltner_channels, bb_squeeze
 )
+from config.settings import SESSION
 
 
 class FeatureEngine:
@@ -238,26 +239,41 @@ class FeatureEngine:
 
         return pd.DataFrame(feats, index=df.index)
 
+    @staticmethod
+    def _parse_time(t: str) -> int:
+        """Convert 'HH:MM' to minutes since midnight."""
+        h, m = map(int, t.split(":"))
+        return h * 60 + m
+
     def _session_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Time-of-day features — encodes intraday seasonality."""
         feats = {}
         idx   = pd.to_datetime(df.index)
 
+        mkt_open  = self._parse_time(SESSION["market_open"])
+        mkt_close = self._parse_time(SESSION["market_close"])
+
         # Minute of day (normalised 0-1)
         mins = idx.hour * 60 + idx.minute
-        total_session = (15 * 60 + 30) - (9 * 60 + 15)
-        feats["session_progress"] = (mins - (9 * 60 + 15)) / total_session
+        total_session = mkt_close - mkt_open
+        feats["session_progress"] = (mins - mkt_open) / max(total_session, 1)
 
         # Cyclical encoding (handles wrap-around)
         feats["time_sin"] = np.sin(2 * np.pi * mins / (24 * 60))
         feats["time_cos"] = np.cos(2 * np.pi * mins / (24 * 60))
 
-        # Session zones (one-hot)
-        feats["zone_open"]    = ((mins >= 555) & (mins < 570)).astype(float)   # 09:15–09:30
-        feats["zone_morning"] = ((mins >= 570) & (mins < 660)).astype(float)   # 09:30–11:00
-        feats["zone_midday"]  = ((mins >= 660) & (mins < 780)).astype(float)   # 11:00–13:00
-        feats["zone_afternoon"]= ((mins >= 780) & (mins < 870)).astype(float)  # 13:00–14:30
-        feats["zone_close"]   = ((mins >= 870) & (mins <= 930)).astype(float)  # 14:30–15:30
+        # Session zones (one-hot) — split session into 5 equal zones
+        zone_len = total_session // 5
+        z1 = mkt_open
+        z2 = z1 + zone_len
+        z3 = z2 + zone_len
+        z4 = z3 + zone_len
+        z5 = z4 + zone_len
+        feats["zone_open"]     = ((mins >= z1) & (mins < z2)).astype(float)
+        feats["zone_morning"]  = ((mins >= z2) & (mins < z3)).astype(float)
+        feats["zone_midday"]   = ((mins >= z3) & (mins < z4)).astype(float)
+        feats["zone_afternoon"]= ((mins >= z4) & (mins < z5)).astype(float)
+        feats["zone_close"]    = ((mins >= z5) & (mins <= mkt_close)).astype(float)
 
         # Day of week
         dow = idx.dayofweek   # 0=Mon, 4=Fri

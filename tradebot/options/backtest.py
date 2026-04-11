@@ -35,6 +35,11 @@ from options.strategies import OptionsStrategyBuilder, OptionsPosition
 from options.signals import OptionsSignalEngine
 from options.risk import OptionsRiskManager
 from risk.cost_model import CostModel
+from config.settings import INSTRUMENTS, MARKET, RISK_FREE_RATE, COST_MODEL, RISK
+
+_CUR = "$" if MARKET == "US" else "₹"
+_DEF_SYM = list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY"
+_DEF_BROKER = "us_paper" if MARKET == "US" else "zerodha"
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +101,14 @@ class OptionsBacktestResult:
             n >= 50                         # options: fewer trades expected
             and self.win_rate >= 55.0
             and self.profit_factor >= 1.3
-            and self.max_drawdown < 15000
+            and self.max_drawdown < self._max_dd_limit()
             and self.expectancy > 0
         )
+
+    @staticmethod
+    def _max_dd_limit() -> float:
+        cap = RISK.get("max_capital", 100000)
+        return cap * 0.15  # 15% of capital
 
     def summary(self) -> str:
         gate = "PASS" if self.passed_gate else "FAIL"
@@ -108,8 +118,8 @@ class OptionsBacktestResult:
             f"WR:{self.win_rate:5.1f}% | "
             f"PF:{self.profit_factor:5.2f} | "
             f"Avg capture:{self.avg_pct_captured:5.1f}% | "
-            f"MaxDD:₹{self.max_drawdown:8,.0f} | "
-            f"NetPnL:₹{self.total_pnl:9,.0f} | "
+            f"MaxDD:{_CUR}{self.max_drawdown:8,.0f} | "
+            f"NetPnL:{_CUR}{self.total_pnl:9,.0f} | "
             f"[{gate}]"
         )
 
@@ -124,13 +134,13 @@ class OptionsBacktester:
       - Black-Scholes to price all options
     """
 
-    def __init__(self, symbol: str = "BANKNIFTY", lots: int = 1):
-        self.symbol  = symbol
+    def __init__(self, symbol: str = None, lots: int = 1):
+        self.symbol  = symbol or _DEF_SYM
         self.lots    = lots
         self.bs      = BSModel()
         self.expiry  = ExpiryManager()
         self.builder = OptionsStrategyBuilder()
-        self.cost    = CostModel("zerodha")
+        self.cost    = CostModel(_DEF_BROKER)
 
     def run(
         self,
@@ -209,11 +219,13 @@ class OptionsBacktester:
     ) -> OptionChain:
         """Reconstruct option chain using Black-Scholes."""
         from options.data import OptionChain as OC
-        step    = 100 if self.symbol == "BANKNIFTY" else 50
+        inst    = INSTRUMENTS.get(self.symbol, {})
+        step    = inst.get("strike_step", 1 if MARKET == "US" else 100)
         tte     = max(0.001, (expiry - sim_date).days / 252.0)
-        r       = 0.065
+        r       = RISK_FREE_RATE
 
-        strikes = range(int(spot - 2000), int(spot + 2100), step)
+        strike_range = int(step * 20)
+        strikes = range(int(spot - strike_range), int(spot + strike_range + step), max(1, step))
         rows    = []
         for k in strikes:
             moneyness = abs(k - spot) / spot
@@ -266,7 +278,7 @@ class OptionsBacktester:
         stop_loss  = -abs(pos.max_loss / self.lots) if pos.max_loss != float("-inf") \
                      else -entry_prem * 2
 
-        r = 0.065
+        r = RISK_FREE_RATE
 
         for j in range(1, min(len(future_daily), 15)):
             sim_row  = future_daily.iloc[j]
@@ -290,11 +302,11 @@ class OptionsBacktester:
                 exit_reason = "EXPIRY"
                 final_pnl   = current_value
                 break
-            elif current_value >= max_profit * 0.50 * self.lots * 15:
+            elif current_value >= max_profit * 0.50 * self.lots * self._lot_size():
                 exit_reason = "TARGET_50"
                 final_pnl   = current_value
                 break
-            elif current_value <= stop_loss * self.lots * 15:
+            elif current_value <= stop_loss * self.lots * self._lot_size():
                 exit_reason = "STOP_LOSS"
                 final_pnl   = current_value
                 break
@@ -318,14 +330,18 @@ class OptionsBacktester:
             cost=cost,
         )
 
+    def _lot_size(self) -> int:
+        return INSTRUMENTS.get(self.symbol, {}).get("lot_size", 1)
+
     def _options_cost(self, pos: OptionsPosition) -> float:
         total = 0.0
+        cm = COST_MODEL.get(_DEF_BROKER, {})
         for leg in pos.legs:
             notional  = leg.premium * leg.lots * leg.lot_size
-            brokerage = 20.0
-            stt       = notional * 0.0005 if leg.action == "sell" else 0
-            exc       = notional * 0.00005
-            gst       = brokerage * 0.18
+            brokerage = cm.get("brokerage_per_order", 0)
+            stt       = notional * cm.get("stt_pct_sell", 0) if leg.action == "sell" else 0
+            exc       = notional * cm.get("exchange_txn_charge_pct", 0)
+            gst       = brokerage * cm.get("gst_pct", 0)
             total    += brokerage + stt + exc + gst
         return round(total * 2, 2)   # entry + exit
 

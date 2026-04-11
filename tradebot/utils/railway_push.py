@@ -17,6 +17,14 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+def _default_symbol():
+    try:
+        from config.settings import INSTRUMENTS
+        syms = list(INSTRUMENTS.keys())
+        return syms[0] if syms else "SPY"
+    except Exception:
+        return "SPY"
+
 # Lazy import so we don't break imports if requests isn't installed
 _requests = None
 
@@ -78,7 +86,7 @@ class RailwayPusher:
     def push_trade(self, trade: dict) -> None:
         """Push a completed trade to Railway."""
         self._push("push/trade", {
-            "symbol":      trade.get("symbol", "BANKNIFTY"),
+            "symbol":      trade.get("symbol", _default_symbol()),
             "strategy":    trade.get("strategy", ""),
             "direction":   trade.get("direction", ""),
             "entry_price": trade.get("entry_price", 0),
@@ -104,7 +112,7 @@ class RailwayPusher:
     def push_options_trade(self, trade) -> None:
         """Push an options paper trade."""
         self._push("push/trade", {
-            "symbol":      getattr(trade, "symbol", "BANKNIFTY"),
+            "symbol":      getattr(trade, "symbol", _default_symbol()),
             "strategy":    getattr(trade, "strategy", "options"),
             "direction":   "OPTIONS",
             "entry_price": getattr(trade, "entry_spot", 0),

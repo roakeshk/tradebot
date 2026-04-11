@@ -34,7 +34,16 @@ from strategy.indicators import (
     ema, rsi, atr, vwap, vwap_bands, opening_range,
     macd, volume_delta, bollinger_bands
 )
-from config.settings import RISK
+from config.settings import RISK, SESSION
+
+
+# Parse session boundaries once at import (minutes since midnight)
+def _parse_time(t: str) -> int:
+    h, m = map(int, t.split(":"))
+    return h * 60 + m
+
+_SESSION_START      = _parse_time(SESSION["first_candle_end"])  # after opening candle
+_SESSION_NO_TRADE   = _parse_time(SESSION["no_trade_after"])    # no new entries after this
 
 
 # ── Strategy 1: VWAP Mean Reversion ─────────────────────────
@@ -95,9 +104,9 @@ class VWAPReversion(StrategyBase):
         try:
             hour, minute = ts.hour, ts.minute
             total_min = hour * 60 + minute
-            if total_min < 9 * 60 + 30:   # skip first 15 min
+            if total_min < _SESSION_START:
                 return []
-            if total_min > 15 * 60 + 15:  # skip last 15 min
+            if total_min > _SESSION_NO_TRADE:
                 return []
         except AttributeError:
             pass
@@ -208,8 +217,8 @@ class OpeningRangeBreakout(StrategyBase):
         "range_minutes":      15,
         "max_range_atr_mult": 1.5,   # skip if OR is wider than 1.5×ATR
         "volume_mult":        1.5,   # breakout bar volume must be 1.5× avg
-        "latest_entry_hour":  11,
-        "latest_entry_min":   30,
+        "latest_entry_hour":  _SESSION_NO_TRADE // 60 - 2,  # 2h before no-trade cutoff
+        "latest_entry_min":   _SESSION_NO_TRADE % 60,
         "rr_ratio":           1.8,
     }
 
@@ -237,7 +246,7 @@ class OpeningRangeBreakout(StrategyBase):
 
         try:
             total_min = ts.hour * 60 + ts.minute
-            if total_min < 9 * 60 + 30:   # OR not yet complete
+            if total_min < _SESSION_START:   # OR not yet complete
                 return []
             if total_min > self.params["latest_entry_hour"] * 60 + self.params["latest_entry_min"]:
                 return []
@@ -367,9 +376,9 @@ class EMATrendFollow(StrategyBase):
 
         try:
             total_min = ts.hour * 60 + ts.minute
-            if total_min < 9 * 60 + 30:
+            if total_min < _SESSION_START:
                 return []
-            if total_min > 15 * 60 + 15:
+            if total_min > _SESSION_NO_TRADE:
                 return []
         except AttributeError:
             pass

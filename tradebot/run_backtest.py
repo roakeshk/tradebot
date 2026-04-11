@@ -29,14 +29,23 @@ from utils.logger import setup_logging
 from data.pipeline import DataPipeline
 from strategy.strategies import build_strategies
 from backtest.engine import WalkForwardRunner, BacktestEngine
-from config.settings import PROC_DIR
+from config.settings import PROC_DIR, INSTRUMENTS, MARKET, RISK
+
+
+def _default_symbol():
+    return list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY"
+
+def _default_broker():
+    return "us_paper" if MARKET == "US" else "zerodha"
+
+_CURRENCY = "$" if MARKET == "US" else "₹"
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run walk-forward backtest")
-    parser.add_argument("--symbol",    default="BANKNIFTY", choices=["BANKNIFTY", "NIFTY"])
+    parser.add_argument("--symbol",    default=_default_symbol(), choices=list(INSTRUMENTS.keys()))
     parser.add_argument("--lots",      default=1, type=int)
-    parser.add_argument("--broker",    default="zerodha", choices=["zerodha", "shoonya"])
+    parser.add_argument("--broker",    default=_default_broker(), choices=["zerodha", "shoonya", "paper", "us_paper"])
     parser.add_argument("--timeframe", default="5min")
     parser.add_argument("--quick",     action="store_true", help="Single-pass backtest (faster)")
     args = parser.parse_args()
@@ -128,8 +137,9 @@ def main():
                     print(f"         Need ≥55% win rate, got {row['win_rate']:.1f}%")
                 if row["profit_factor"] < 1.4:
                     print(f"         Need PF≥1.4, got {row['profit_factor']:.2f}")
-                if row["max_drawdown"] >= 12000:
-                    print(f"         Need MaxDD<₹12000, got ₹{row['max_drawdown']:,.0f}")
+                dd_limit = RISK["max_capital"] * (RISK["max_drawdown_pct"] / 100)
+                if row["max_drawdown"] >= dd_limit:
+                    print(f"         Need MaxDD<{_CURRENCY}{dd_limit:,.0f}, got {_CURRENCY}{row['max_drawdown']:,.0f}")
 
         # Save full trade logs
         all_trades = [t for res_list in results.values() for r in res_list for t in r.trades]

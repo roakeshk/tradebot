@@ -21,7 +21,7 @@ import math
 import pandas as pd
 import numpy as np
 
-from config.settings import DATA_DIR, INSTRUMENTS
+from config.settings import DATA_DIR, INSTRUMENTS, SESSION, MARKET, RISK_FREE_RATE
 from options.pricing import BSModel
 
 logger = logging.getLogger(__name__)
@@ -41,16 +41,13 @@ class ExpiryManager:
     premium-selling strategies (theta decay is fastest here).
     """
 
-    WEEKLY_DAYS = {
-        "BANKNIFTY": 2,   # Wednesday = 2
-        "NIFTY":     3,   # Thursday  = 3
-        "MIDCPNIFTY":3,
-        "FINNIFTY":  1,   # Tuesday   = 1
-    }
+    # Expiry weekday is now config-driven via INSTRUMENTS[symbol]["expiry_weekday"]
+    # US options: Friday (4), India varies by symbol
 
     def get_expiries(self, symbol: str, n: int = 4) -> list[date]:
         """Return next N expiry dates for symbol."""
-        weekday = self.WEEKLY_DAYS.get(symbol, 3)
+        inst = INSTRUMENTS.get(symbol, {})
+        weekday = inst.get("expiry_weekday", 4 if MARKET == "US" else 3)
         expiries = []
         d = date.today()
         while len(expiries) < n:
@@ -71,13 +68,18 @@ class ExpiryManager:
         hours_remaining = 0
         now = datetime.now()
         if days == 0:
-            close = datetime.now().replace(hour=15, minute=30, second=0)
+            _ch, _cm = map(int, SESSION["market_close"].split(":"))
+            close = datetime.now().replace(hour=_ch, minute=_cm, second=0)
             hours_remaining = max(0, (close - now).total_seconds() / 3600)
-            return hours_remaining / (252 * 6.25)   # 6.25 trading hours/day
+            _oh, _om = map(int, SESSION["market_open"].split(":"))
+            trading_hours = (_ch * 60 + _cm - _oh * 60 - _om) / 60.0
+            return hours_remaining / (252 * trading_hours)
         return days / 252.0
 
     def is_expiry_day(self, symbol: str) -> bool:
-        return date.today().weekday() == self.WEEKLY_DAYS.get(symbol, 3)
+        inst = INSTRUMENTS.get(symbol, {})
+        weekday = inst.get("expiry_weekday", 4 if MARKET == "US" else 3)
+        return date.today().weekday() == weekday
 
 
 class OptionChain:
@@ -251,7 +253,8 @@ class OptionsDataPipeline:
         if self.broker is None:
             return None
         try:
-            spot = self.broker.get_ltp(symbol, "NSE")
+            exchange = INSTRUMENTS.get(symbol, {}).get("exchange", "NSE")
+            spot = self.broker.get_ltp(symbol, exchange)
             if spot <= 0:
                 return None
 
@@ -317,11 +320,11 @@ class OptionsDataPipeline:
                 if ltp > 0:
                     iv = bs.implied_volatility(
                         market_price=ltp, S=spot, K=row["strike"],
-                        T=0.02, r=0.065, option_type=opt_type
+                        T=0.02, r=RISK_FREE_RATE, option_type=opt_type
                     )
                     g = bs.greeks(
                         S=spot, K=row["strike"], T=0.02,
-                        r=0.065, sigma=iv, option_type=opt_type
+                        r=RISK_FREE_RATE, sigma=iv, option_type=opt_type
                     )
                     df.at[idx, f"{opt_type}_iv"]    = round(iv * 100, 2)
                     df.at[idx, f"{opt_type}_delta"] = round(g["delta"], 4)
@@ -339,19 +342,22 @@ class OptionsDataPipeline:
     def _synthetic_chain(self, symbol: str, expiry: date) -> OptionChain:
         """
         Generate a realistic synthetic option chain for testing.
-        Uses Black-Scholes with typical BankNifty IV (~18%).
+        Uses Black-Scholes with instrument-specific default IV.
         """
-        spot_map = {"BANKNIFTY": 48000, "NIFTY": 22000}
-        spot   = spot_map.get(symbol, 48000)
-        step   = 100 if symbol == "BANKNIFTY" else 50
+        inst   = INSTRUMENTS.get(symbol, {})
+        spot   = inst.get("default_spot", 500)
+        step   = inst.get("strike_step", 1 if MARKET == "US" else 100)
         tte    = ExpiryManager().time_to_expiry(expiry)
         bs     = BSModel()
-        iv_atm = 0.18  # 18% typical BankNifty IV
+        iv_atm = inst.get("default_iv", 0.18)
+        r      = RISK_FREE_RATE
 
+        # Determine range (wider for higher-priced underlyings)
+        strike_range = int(step * 20)
         strikes = range(
-            int(spot - 2000),
-            int(spot + 2100),
-            step
+            int(spot - strike_range),
+            int(spot + strike_range + step),
+            max(1, int(step))
         )
 
         rows = []
@@ -359,10 +365,10 @@ class OptionsDataPipeline:
             # IV smile: higher IV for OTM options
             moneyness  = abs(k - spot) / spot
             iv_smile   = iv_atm * (1 + 0.5 * moneyness)
-            ce_price   = max(0.05, bs.price(spot, k, tte, 0.065, iv_smile, "ce"))
-            pe_price   = max(0.05, bs.price(spot, k, tte, 0.065, iv_smile, "pe"))
-            ce_greeks  = bs.greeks(spot, k, tte, 0.065, iv_smile, "ce")
-            pe_greeks  = bs.greeks(spot, k, tte, 0.065, iv_smile, "pe")
+            ce_price   = max(0.05, bs.price(spot, k, tte, r, iv_smile, "ce"))
+            pe_price   = max(0.05, bs.price(spot, k, tte, r, iv_smile, "pe"))
+            ce_greeks  = bs.greeks(spot, k, tte, r, iv_smile, "ce")
+            pe_greeks  = bs.greeks(spot, k, tte, r, iv_smile, "pe")
 
             rows.append({
                 "strike":    float(k),

@@ -23,12 +23,23 @@ from config.settings import DATA, DATA_DIR, INSTRUMENTS, TIMEFRAMES
 
 logger = logging.getLogger(__name__)
 
-# yfinance symbol mapping (index proxies — not futures, but good for strategy dev)
+# yfinance symbol mapping — for symbols that don't match yfinance tickers
+# US stocks use their ticker directly; only special cases need mapping
 YF_SYMBOL_MAP = {
     "BANKNIFTY": "^NSEBANK",
     "NIFTY":     "^NSEI",
     "CRUDEOIL":  "CL=F",     # NYMEX crude (not MCX, use for strategy shape)
 }
+
+def _get_yf_symbol(symbol: str) -> str:
+    """Get yfinance ticker for a symbol. US stocks map directly."""
+    from config.settings import INSTRUMENTS
+    inst = INSTRUMENTS.get(symbol, {})
+    # If instrument config has yfinance key, use it
+    if "yfinance" in inst:
+        return inst["yfinance"]
+    # Fall back to mapping, then use symbol directly (works for US stocks)
+    return YF_SYMBOL_MAP.get(symbol, symbol)
 
 INTERVAL_MAP_YF = {
     "1min":  "1m",
@@ -172,10 +183,7 @@ class DataPipeline:
             logger.error("yfinance not installed. Run: pip install yfinance")
             return None
 
-        yf_sym = YF_SYMBOL_MAP.get(symbol)
-        if yf_sym is None:
-            logger.error(f"No yfinance mapping for {symbol}")
-            return None
+        yf_sym = _get_yf_symbol(symbol)
 
         yf_interval = INTERVAL_MAP_YF.get(timeframe, "1d")
 
@@ -385,8 +393,8 @@ class DataPipeline:
         Useful for multi-timeframe analysis.
         """
         freq_map = {
-            "1min": "1T", "3min": "3T", "5min": "5T",
-            "15min": "15T", "1hour": "1H", "1day": "1D"
+            "1min": "1min", "3min": "3min", "5min": "5min",
+            "15min": "15min", "1hour": "1h", "1day": "1D"
         }
         freq = freq_map.get(to_tf)
         if not freq:
@@ -437,12 +445,12 @@ if __name__ == "__main__":
 
     dp = DataPipeline()
 
-    # Fetch primary instruments and timeframes
-    priority_instruments = ["BANKNIFTY", "NIFTY"]
+    # Fetch configured instruments
+    priority_instruments = list(INSTRUMENTS.keys())[:3]  # top 3 by priority
     priority_timeframes  = ["5min", "15min", "1hour", "1day"]
 
     print("\n" + "=" * 60)
-    print("INITIAL DATA FETCH")
+    print(f"INITIAL DATA FETCH ({len(priority_instruments)} instruments)")
     print("=" * 60)
 
     for sym in priority_instruments:
@@ -461,6 +469,7 @@ if __name__ == "__main__":
     print(summary.to_string(index=False))
 
     # Show sample data
-    print("\nSample BankNifty 5min (last 5 bars):")
-    df = dp.get("BANKNIFTY", "5min", n_bars=5)
+    first_sym = priority_instruments[0]
+    print(f"\nSample {first_sym} 5min (last 5 bars):")
+    df = dp.get(first_sym, "5min", n_bars=5)
     print(df.to_string())

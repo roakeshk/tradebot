@@ -5,7 +5,7 @@
 #
 #  Run every Sunday evening (or trigger when accuracy drops):
 #    python -m ai.retrain
-#    python -m ai.retrain --symbol BANKNIFTY --force
+#    python -m ai.retrain --symbol SPY --force
 #
 #  What it does:
 #    1. Loads latest OHLCV data from cache
@@ -31,7 +31,7 @@ from data.pipeline import DataPipeline
 from ai.features import FeatureEngine
 from ai.classifier import MultiStrategyClassifier
 from strategy.strategies import ALL_STRATEGIES
-from config.settings import PROC_DIR, PRIMARY_TF
+from config.settings import PROC_DIR, PRIMARY_TF, INSTRUMENTS
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,8 @@ def load_all_trades(symbol: str) -> pd.DataFrame:
 
 def main():
     parser = argparse.ArgumentParser(description="Retrain AI classifiers")
-    parser.add_argument("--symbol",    default="BANKNIFTY")
+    _def_sym = list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY"
+    parser.add_argument("--symbol",    default=_def_sym)
     parser.add_argument("--timeframe", default="5min")
     parser.add_argument("--force",     action="store_true", help="Force retrain even if no new data")
     parser.add_argument("--threshold", default=0.55, type=float)

@@ -30,7 +30,11 @@ from strategy.base_strategy import Direction
 from risk.manager import RiskManager
 from risk.cost_model import CostModel
 from utils.logger import setup_logging
-from config.settings import RISK, SESSION, PRIMARY_TF
+from config.settings import RISK, SESSION, PRIMARY_TF, INSTRUMENTS, MARKET
+
+_CUR = "$" if MARKET == "US" else "₹"
+_DEF_SYM = list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY"
+_DEF_BROKER = "us_paper" if MARKET == "US" else "zerodha"
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +55,14 @@ class PaperTradingRunner:
 
     def __init__(
         self,
-        symbol:      str = "BANKNIFTY",
+        symbol:      str = None,
         timeframe:   str = "5min",
         capital:     float = None,
-        broker_name: str = "zerodha",
+        broker_name: str = None,
     ):
-        self.symbol     = symbol
+        self.symbol     = symbol or _DEF_SYM
         self.timeframe  = timeframe
-        self.broker_name = broker_name
+        self.broker_name = broker_name or _DEF_BROKER
 
         self.paper    = PaperBroker(capital, cost_model=broker_name)
         self.dp       = DataPipeline()
@@ -75,7 +79,7 @@ class PaperTradingRunner:
         self._log_path = Path("data/processed") / f"paper_{symbol}_{datetime.now():%Y%m%d}.csv"
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"PaperRunner | {symbol} {timeframe} | capital=₹{self.risk.capital:,.0f}")
+        logger.info(f"PaperRunner | {symbol} {timeframe} | capital={_CUR}{self.risk.capital:,.0f}")
 
     # ── Main loop ─────────────────────────────────────────────
 
@@ -192,7 +196,7 @@ class PaperTradingRunner:
                         symbol=self.symbol,
                         side=OrderSide.BUY if sig.direction == Direction.LONG else OrderSide.SELL,
                         order_type=OrderType.MARKET,
-                        quantity=result.lots * 15,   # lots × lot_size
+                        quantity=result.lots * INSTRUMENTS.get(self.symbol, {}).get("lot_size", 1),
                         tag=sig.strategy[:20],
                     )
                     order_id = self.paper.place_order(order)
@@ -223,7 +227,8 @@ class PaperTradingRunner:
                 tgt = info["target"]
                 hit_sl  = candle["low"]  <= sl  if sig.direction == Direction.LONG  else candle["high"] >= sl
                 hit_tgt = candle["high"] >= tgt if sig.direction == Direction.LONG  else candle["low"]  <= tgt
-                eod     = ts.hour * 60 + ts.minute >= 15 * 60 + 15
+                _nh, _nm = map(int, SESSION["no_trade_after"].split(":"))
+                eod     = ts.hour * 60 + ts.minute >= _nh * 60 + _nm
 
                 exit_reason = None
                 exit_price  = None
@@ -246,13 +251,15 @@ class PaperTradingRunner:
                     pnl = pos.pnl
                     self.risk.record_close(pnl)
                     del self._open_signals[order_id]
-                    logger.info(f"  [EXIT] {exit_reason} @ {exit_price:.0f} | PnL=₹{pnl:,.0f}")
+                    logger.info(f"  [EXIT] {exit_reason} @ {exit_price:.0f} | PnL={_CUR}{pnl:,.0f}")
                     break
 
     def _is_market_hours(self, now: datetime) -> bool:
         h, m = now.hour, now.minute
         total = h * 60 + m
-        return 9 * 60 + 15 <= total <= 15 * 60 + 30
+        _oh, _om = map(int, SESSION["market_open"].split(":"))
+        _ch, _cm = map(int, SESSION["market_close"].split(":"))
+        return _oh * 60 + _om <= total <= _ch * 60 + _cm
 
     def _save_session_report(self) -> None:
         summary = self.paper.get_daily_summary()
@@ -270,9 +277,9 @@ if __name__ == "__main__":
     setup_logging("paper_trading")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbol",   default="BANKNIFTY")
+    parser.add_argument("--symbol",   default=_DEF_SYM)
     parser.add_argument("--capital",  default=100000, type=float)
-    parser.add_argument("--broker",   default="zerodha")
+    parser.add_argument("--broker",   default=_DEF_BROKER)
     args = parser.parse_args()
 
     runner = PaperTradingRunner(args.symbol, capital=args.capital, broker_name=args.broker)

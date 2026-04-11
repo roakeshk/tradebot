@@ -25,6 +25,7 @@ import pandas as pd
 from options.data import OptionChain, OptionsDataPipeline, _get_iv_rank
 from options.strategies import OptionsPosition, OptionsStrategyBuilder
 from strategy.regime import RegimeClassifier, RegimeState, Regime
+from config.settings import SESSION, INSTRUMENTS, MARKET
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,9 @@ class OptionsSignalEngine:
         # ── 3. Session time filter ────────────────────────────
         now = datetime.now()
         hour_min = now.hour * 60 + now.minute
-        if hour_min < 9 * 60 + 30 or hour_min > 15 * 60 + 10:
+        _oh, _om = map(int, SESSION["market_open"].split(":"))
+        _nh, _nm = map(int, SESSION["no_trade_after"].split(":"))
+        if hour_min < _oh * 60 + _om or hour_min > _nh * 60 + _nm:
             logger.debug("Outside trading hours")
             return None
 
@@ -193,7 +196,7 @@ class OptionsSignalEngine:
             return 0.0
 
         atm       = chain.atm
-        step      = 100 if chain.symbol == "BANKNIFTY" else 50
+        step      = INSTRUMENTS.get(chain.symbol, {}).get("strike_step", 1 if MARKET == "US" else 100)
         otm_calls = chain.df[chain.df["strike"] > atm + step * 2]["ce_iv"]
         otm_puts  = chain.df[chain.df["strike"] < atm - step * 2]["pe_iv"]
 

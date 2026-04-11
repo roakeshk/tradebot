@@ -19,6 +19,13 @@ import sys
 from pathlib import Path
 
 BASE = Path(__file__).parent
+sys.path.insert(0, str(BASE))
+
+from config.settings import INSTRUMENTS, MARKET, RISK
+
+_CUR = "$" if MARKET == "US" else "₹"
+_DEF_BROKER = "us_paper" if MARKET == "US" else "zerodha"
+_SYMBOLS = list(INSTRUMENTS.keys()) or (["SPY"] if MARKET == "US" else ["BANKNIFTY"])
 
 PACKAGES = [
     "pandas>=2.0",
@@ -66,7 +73,7 @@ def fetch_data():
         from data.pipeline import DataPipeline
         from config.settings import DATA
         dp = DataPipeline()
-        for sym in ["BANKNIFTY", "NIFTY"]:
+        for sym in _SYMBOLS:
             for tf in ["5min", "15min", "1day"]:
                 print(f"      Fetching {sym} {tf}...", end="", flush=True)
                 n = dp.fetch_and_store(sym, tf, years_back=1, force=False)
@@ -81,13 +88,16 @@ def cost_check():
     sys.path.insert(0, str(BASE))
     try:
         from risk.cost_model import CostModel
-        cm = CostModel("zerodha")
-        bep = cm.min_points_to_breakeven("BANKNIFTY", lots=1, price=48000)
-        proj = cm.annual_cost_estimate("BANKNIFTY", 1, 48000, trades_per_day=5)
-        print(f"      BankNifty 1 lot @ ₹48,000:")
+        _sym = _SYMBOLS[0]
+        _inst = INSTRUMENTS.get(_sym, {})
+        _spot = _inst.get("default_spot", 500)
+        cm = CostModel(_DEF_BROKER)
+        bep = cm.min_points_to_breakeven(_sym, lots=1, price=_spot)
+        proj = cm.annual_cost_estimate(_sym, 1, _spot, trades_per_day=5)
+        print(f"      {_sym} 1 lot @ {_CUR}{_spot:,}:")
         print(f"        Breakeven points per trade: {bep}")
-        print(f"        Cost per round-trip:  ₹{proj['cost_per_round_trip_inr']}")
-        print(f"        Annual cost (5 trades/day): ₹{proj['annual_cost_inr']:,.0f}")
+        print(f"        Cost per round-trip:  {_CUR}{proj.get('cost_per_round_trip_inr', proj.get('cost_per_round_trip', 0))}")
+        print(f"        Annual cost (5 trades/day): {_CUR}{proj.get('annual_cost_inr', proj.get('annual_cost', 0)):,.0f}")
         print(f"      Done.")
     except Exception as e:
         print(f"      WARNING: Cost check failed: {e}")

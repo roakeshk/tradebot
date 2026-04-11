@@ -26,7 +26,7 @@ from simulation.simulator    import MarketSimulator, SimMode, SimBar
 from simulation.options_paper import OptionsPaperRunner
 from options.chain_feed       import ChainFeed
 from options.data             import ExpiryManager
-from config.settings          import PROC_DIR
+from config.settings          import PROC_DIR, INSTRUMENTS, MARKET, RISK
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +52,14 @@ class OptionsBacktestReport:
 
     def __str__(self) -> str:
         gate = "PASS" if self.passed_gate else "FAIL"
+        cur  = "$" if MARKET == "US" else "Rs."
         return (
             f"[{gate}] {self.strategy:22s} | "
             f"Trades:{self.total_trades:4d} | "
             f"WR:{self.win_rate:5.1f}% | "
             f"PF:{self.profit_factor:5.2f} | "
-            f"NetPnL:Rs.{self.total_net_pnl:8,.0f} | "
-            f"MaxDD:Rs.{self.max_drawdown:7,.0f} | "
+            f"NetPnL:{cur}{self.total_net_pnl:8,.0f} | "
+            f"MaxDD:{cur}{self.max_drawdown:7,.0f} | "
             f"Sharpe:{self.sharpe:5.2f}"
         )
 
@@ -76,18 +77,18 @@ class OptionsBacktestRunner:
         "min_trades":     30,
         "min_win_rate":   55.0,
         "min_pf":         1.3,
-        "max_drawdown":   15000,
+        "max_drawdown":   RISK["max_capital"] * (RISK["max_drawdown_pct"] / 100),
     }
 
     def __init__(
         self,
-        symbol:      str   = "BANKNIFTY",
+        symbol:      str   = None,
         capital:     float = 100000.0,
-        broker_name: str   = "zerodha",
+        broker_name: str   = None,
     ):
-        self.symbol      = symbol
+        self.symbol      = symbol or (list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY")
         self.capital     = capital
-        self.broker_name = broker_name
+        self.broker_name = broker_name or ("us_paper" if MARKET == "US" else "zerodha")
 
     def run(
         self,
@@ -195,7 +196,8 @@ class OptionsBacktestRunner:
         print(f"\n{'='*85}")
         print(f" OPTIONS BACKTEST RESULTS — {self.symbol}")
         print(f"{'='*85}")
-        print(f" Gate: trades≥{self.GATE['min_trades']} | WR≥{self.GATE['min_win_rate']}% | PF≥{self.GATE['min_pf']} | MaxDD≤Rs.{self.GATE['max_drawdown']:,}")
+        cur = "$" if MARKET == "US" else "Rs."
+        print(f" Gate: trades≥{self.GATE['min_trades']} | WR≥{self.GATE['min_win_rate']}% | PF≥{self.GATE['min_pf']} | MaxDD≤{cur}{self.GATE['max_drawdown']:,.0f}")
         print(f"{'─'*85}")
         for r in reports:
             print(f" {r}")
@@ -208,7 +210,8 @@ class OptionsBacktestRunner:
             print(f"\n ✗ No strategies passed gate — review filters and data range")
 
 
-def run_quick_demo(symbol: str = "BANKNIFTY") -> None:
+def run_quick_demo(symbol: str = None) -> None:
+    symbol = symbol or (list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY")
     """
     Quick demo — simulates options trading on last 30 days.
     Shows that the entire system works without any broker.
@@ -231,10 +234,12 @@ if __name__ == "__main__":
     setup_logging("options_backtest")
 
     parser = argparse.ArgumentParser(description="Options historical backtest")
-    parser.add_argument("--symbol",   default="BANKNIFTY")
+    _def_sym = list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY"
+    _def_broker = "us_paper" if MARKET == "US" else "zerodha"
+    parser.add_argument("--symbol",   default=_def_sym)
     parser.add_argument("--days",     default=90, type=int)
     parser.add_argument("--capital",  default=100000, type=float)
-    parser.add_argument("--broker",   default="zerodha")
+    parser.add_argument("--broker",   default=_def_broker)
     args = parser.parse_args()
 
     runner = OptionsBacktestRunner(args.symbol, args.capital, args.broker)

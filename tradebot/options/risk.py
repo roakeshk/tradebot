@@ -18,7 +18,9 @@ from typing import Optional
 
 from options.strategies import OptionsPosition, OptionsLeg
 from options.data import OptionChain
-from config.settings import RISK
+from config.settings import RISK, MARKET, INSTRUMENTS
+
+_CUR = "$" if MARKET == "US" else "₹"
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,7 @@ class OptionsRiskManager:
     """
 
     def __init__(self, capital: float = None):
-        self.capital       = capital or RISK["max_capital_inr"]
+        self.capital       = capital or RISK["max_capital"]
         self.initial_cap   = self.capital
         self._daily_pnl    = 0.0
         self._trades_today = 0
@@ -57,7 +59,7 @@ class OptionsRiskManager:
         # Options-specific limits
         self.max_premium_risk_pct = 2.0     # max 2% capital as premium risk per trade
         self.max_net_delta        = 0.30    # max |net delta| per 1 lot
-        self.max_vega_exposure    = 500.0   # max vega per ₹1 lakh capital
+        self.max_vega_exposure    = 500.0   # max vega per unit of capital
         self.max_gamma_risk_dte   = 1       # don't sell options with DTE ≤ 1 (gamma too high)
         self.max_open_positions   = 3       # max concurrent options positions
         self._open_positions:list = []
@@ -154,7 +156,7 @@ class OptionsRiskManager:
         if est_margin > self.capital * 0.60:
             return OptionsSizeResult(
                 False, 0,
-                f"Estimated margin ₹{est_margin:,.0f} > 60% of capital"
+                f"Estimated margin {_CUR}{est_margin:,.0f} > 60% of capital"
             )
 
         self._trades_today += 1

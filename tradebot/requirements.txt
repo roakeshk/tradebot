@@ -10,13 +10,13 @@ numpy>=1.24
 python-dateutil>=2.8
 pytz>=2023.3
 
-# Market data (free fallback)
+# Market data (free — works for both US and India)
 yfinance>=0.2.36
 
 # Technical indicators
 ta>=0.11.0
 
-# Statistics & ML (Phase 2+)
+# Statistics & ML (Engine B — AI classifier)
 scipy>=1.11
 scikit-learn>=1.3
 xgboost>=2.0
@@ -39,8 +39,7 @@ lightgbm>=4.0
 # Dashboard
 streamlit>=1.28
 
-# Utilities
+# Web / utilities
 requests>=2.31
-python-dotenv>=1.0
 flask>=3.0
 python-dotenv>=1.0

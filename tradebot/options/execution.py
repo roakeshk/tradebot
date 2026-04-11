@@ -5,11 +5,11 @@
 #  Manages the full lifecycle of options positions:
 #    Open → Monitor → Adjust → Close
 #
-#  Execution specifics for NSE options:
+#  Execution specifics for options:
 #    - Always use LIMIT orders with a buffer (options spread is wide)
 #    - Multi-leg positions: send legs simultaneously or in sequence
 #    - Exit rule: 50% profit OR 2× loss (whichever comes first)
-#    - EOD exit: close all positions by 15:15 IST (avoid gamma risk)
+#    - EOD exit: close all positions near market close (avoid gamma risk)
 #    - Roll logic: when DTE ≤ 2, roll to next week if position profitable
 # ============================================================
 
@@ -27,7 +27,10 @@ from options.signals import OptionsSignalEngine, OptionsSignal
 from broker.base import BrokerBase, Order, OrderSide, OrderType
 from broker.paper_broker import PaperBroker
 from alerts.notifier import Notifier
-from config.settings import INSTRUMENTS
+from config.settings import INSTRUMENTS, MARKET, SESSION, COST_MODEL
+
+_CUR = "$" if MARKET == "US" else "₹"
+_DEF_BROKER = "us_paper" if MARKET == "US" else "zerodha"
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +45,14 @@ class OptionsExecutionEngine:
 
     def __init__(
         self,
-        symbol:      str = "BANKNIFTY",
+        symbol:      str = None,
         broker:      BrokerBase = None,
         capital:     float = 100000,
         use_paper:   bool  = True,
     ):
-        self.symbol    = symbol
-        self.broker    = broker or PaperBroker(capital, cost_model="zerodha")
+        _def_sym = list(INSTRUMENTS.keys())[0] if INSTRUMENTS else "SPY"
+        self.symbol    = symbol or _def_sym
+        self.broker    = broker or PaperBroker(capital, cost_model=_DEF_BROKER)
         self.use_paper = use_paper
         self.odp       = OptionsDataPipeline(None if use_paper else broker)
         self.signal_eng= OptionsSignalEngine()
@@ -132,7 +136,8 @@ class OptionsExecutionEngine:
 
         # EOD exit
         t = ts.hour * 60 + ts.minute
-        if t >= 15 * 60 + 10:
+        _nh, _nm = map(int, SESSION["no_trade_after"].split(":"))
+        if t >= _nh * 60 + _nm:
             should_exit = True
             reason      = "EOD"
 
@@ -156,10 +161,10 @@ class OptionsExecutionEngine:
         })
 
         emoji = "✅" if pnl > 0 else "❌"
-        logger.info(f"Options {reason}: {pos.strategy_name} P&L=₹{pnl:,.0f}")
+        logger.info(f"Options {reason}: {pos.strategy_name} P&L={_CUR}{pnl:,.0f}")
         self.notifier.send(
             f"{emoji} Options {reason} — {pos.strategy_name}\n"
-            f"P&L: ₹{pnl:,.0f} | Reason: {reason}"
+            f"P&L: {_CUR}{pnl:,.0f} | Reason: {reason}"
         )
 
     # ── Entry execution ───────────────────────────────────────
@@ -198,7 +203,7 @@ class OptionsExecutionEngine:
                 logger.info(
                     f"  {'SELL' if side==OrderSide.SELL else 'BUY'} "
                     f"{leg.strike}{leg.option_type.upper()} "
-                    f"@ ₹{leg.premium:.2f} qty={leg.quantity}"
+                    f"@ {_CUR}{leg.premium:.2f} qty={leg.quantity}"
                 )
             return True
         except Exception as e:
@@ -262,12 +267,14 @@ class OptionsExecutionEngine:
         Much lower than futures per trade.
         """
         total = 0.0
+        cm = COST_MODEL.get(_DEF_BROKER, {})
+        slip_ticks = COST_MODEL.get("slippage_ticks", 1)
         for leg in pos.legs:
             notional   = leg.premium * leg.quantity
-            brokerage  = 20.0   # ₹20 flat
-            stt        = notional * 0.0005 if leg.action == "sell" else 0   # 0.05%
-            exc_charge = notional * 0.00005
-            gst        = brokerage * 0.18
+            brokerage  = cm.get("brokerage_per_order", 0)
+            stt        = notional * cm.get("stt_pct_sell", 0) if leg.action == "sell" else 0
+            exc_charge = notional * cm.get("exchange_txn_charge_pct", 0)
+            gst        = brokerage * cm.get("gst_pct", 0)
             total     += brokerage + stt + exc_charge + gst
         return round(total, 2)
 
@@ -280,21 +287,23 @@ class OptionsExecutionEngine:
     def _notify_entry(self, signal: OptionsSignal) -> None:
         pos = signal.position
         legs_str = " | ".join(
-            f"{'S' if l.action=='sell' else 'B'} {int(l.strike)}{l.option_type.upper()} ₹{l.premium:.0f}"
+            f"{'S' if l.action=='sell' else 'B'} {int(l.strike)}{l.option_type.upper()} {_CUR}{l.premium:.0f}"
             for l in pos.legs
         )
         self.notifier.send(
             f"📊 Options entry — {signal.strategy_name}\n"
             f"{signal.symbol} | {legs_str}\n"
             f"IV rank: {signal.iv_rank:.0f} | PCR: {signal.pcr:.2f}\n"
-            f"Max profit: ₹{pos.max_profit:,.0f} | Max loss: ₹{pos.max_loss:,.0f}\n"
+            f"Max profit: {_CUR}{pos.max_profit:,.0f} | Max loss: {_CUR}{pos.max_loss:,.0f}\n"
             f"Breakevens: {pos.breakevens}"
         )
 
     @staticmethod
     def _is_no_trade_zone(ts: datetime) -> bool:
         t = ts.hour * 60 + ts.minute
-        return t < 9 * 60 + 30 or t > 15 * 60 + 5
+        _oh, _om = map(int, SESSION["market_open"].split(":"))
+        _nh, _nm = map(int, SESSION["no_trade_after"].split(":"))
+        return t < _oh * 60 + _om or t > _nh * 60 + _nm
 
     # ── Reporting ─────────────────────────────────────────────
 

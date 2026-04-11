@@ -23,6 +23,13 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, date, timedelta
 
+from config.settings import INSTRUMENTS, RISK, MARKET
+
+_CUR = "$" if MARKET == "US" else "₹"
+_SYMBOLS = list(INSTRUMENTS.keys()) or ["SPY"]
+_DEF_SPOT = INSTRUMENTS.get(_SYMBOLS[0], {}).get("default_spot", 500 if MARKET == "US" else 48500)
+_TZ_LABEL = "ET" if MARKET == "US" else "IST"
+
 st.set_page_config(
     page_title="TradeBot — Options Dashboard",
     page_icon="📊",
@@ -46,8 +53,8 @@ st.markdown("""
 
 # ── Sidebar ───────────────────────────────────────────────────
 st.sidebar.title("TradeBot Options")
-symbol   = st.sidebar.selectbox("Symbol",   ["BANKNIFTY", "NIFTY"])
-capital  = st.sidebar.number_input("Capital (₹)", value=100000, step=10000)
+symbol   = st.sidebar.selectbox("Symbol",   _SYMBOLS)
+capital  = st.sidebar.number_input(f"Capital ({_CUR})", value=int(RISK.get("max_capital", 100000)), step=10000)
 auto_ref = st.sidebar.checkbox("Auto-refresh (60s)", value=True)
 sim_mode = st.sidebar.selectbox("Mode", ["Paper Trading", "Simulation", "Live"])
 
@@ -106,12 +113,12 @@ def get_demo_chain(symbol: str, spot: float, iv: float, dte: int):
 
 # ── Main page ─────────────────────────────────────────────────
 st.title(f"📊 Options Dashboard — {symbol}")
-st.caption(f"Updated: {datetime.now().strftime('%H:%M:%S IST')} | Mode: {sim_mode}")
+st.caption(f"Updated: {datetime.now().strftime('%H:%M:%S')} {_TZ_LABEL} | Mode: {sim_mode}")
 
 # Spot price input (in live mode this comes from broker)
 col_spot, col_iv, col_dte, col_ivr = st.columns(4)
 with col_spot:
-    spot = st.number_input("Spot price", value=48500, step=100)
+    spot = st.number_input("Spot price", value=_DEF_SPOT, step=100)
 with col_iv:
     iv_pct = st.number_input("IV %", value=18.0, step=0.5, min_value=5.0, max_value=80.0)
     iv = iv_pct / 100
@@ -188,7 +195,7 @@ cols = st.columns(len(strats))
 for col, (name, pos) in zip(cols, strats):
     with col:
         if pos:
-            st.markdown(f'<div class="gate-pass">✓ {name}<br><small>Max profit: ₹{pos.max_profit:.0f}</small></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="gate-pass">✓ {name}<br><small>Max profit: {_CUR}{pos.max_profit:.0f}</small></div>', unsafe_allow_html=True)
         else:
             st.markdown(f'<div class="gate-fail">✗ {name}<br><small>Conditions not met</small></div>', unsafe_allow_html=True)
 
@@ -215,8 +222,8 @@ if pos_to_plot:
     st.line_chart(pf_df.set_index("Spot")["P&L"])
 
     if pos_to_plot.breakevens:
-        st.caption(f"Breakevens: {' | '.join([f'₹{b:.0f}' for b in pos_to_plot.breakevens])}")
-    st.caption(f"Max profit: ₹{pos_to_plot.max_profit:.0f}  |  Max loss: {'Unlimited' if pos_to_plot.max_loss == float('inf') else f'₹{pos_to_plot.max_loss:.0f}'}")
+        st.caption(f"Breakevens: {' | '.join([f'{_CUR}{b:.0f}' for b in pos_to_plot.breakevens])}")
+    st.caption(f"Max profit: {_CUR}{pos_to_plot.max_profit:.0f}  |  Max loss: {'Unlimited' if pos_to_plot.max_loss == float('inf') else f'{_CUR}{pos_to_plot.max_loss:.0f}'}")
 
 # ── P&L from trades ───────────────────────────────────────────
 st.markdown("---")
@@ -235,7 +242,7 @@ with left:
         pf = pf_num/pf_den if pf_den > 0 else 0
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("Net P&L", f"₹{pnl.sum():,.0f}")
+        c1.metric("Net P&L", f"{_CUR}{pnl.sum():,.0f}")
         c2.metric("Win rate", f"{wr:.1f}%")
         c3.metric("PF", f"{pf:.2f}")
         st.dataframe(opt_trades[["strategy","entry_time","net_pnl","exit_reason"]].tail(20),
@@ -248,7 +255,7 @@ with right:
     fut_trades = load_futures_trades(symbol)
     if not fut_trades.empty and "net_pnl" in fut_trades.columns:
         pnl = fut_trades["net_pnl"]
-        st.metric("Net P&L", f"₹{pnl.sum():,.0f}")
+        st.metric("Net P&L", f"{_CUR}{pnl.sum():,.0f}")
         st.dataframe(fut_trades[["strategy","entry_time","net_pnl"]].tail(20) if "strategy" in fut_trades else fut_trades.tail(20),
                      use_container_width=True, hide_index=True)
     else:

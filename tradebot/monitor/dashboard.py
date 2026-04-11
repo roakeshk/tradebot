@@ -24,6 +24,13 @@ import numpy as np
 from datetime import datetime
 import time
 
+from config.settings import INSTRUMENTS, COST_MODEL, RISK, MARKET
+
+_CUR = "$" if MARKET == "US" else "₹"
+_SYMBOLS = list(INSTRUMENTS.keys()) or ["SPY"]
+_BROKERS = [k for k in COST_MODEL if k != "slippage_ticks"] + ["paper"]
+_MAX_DD = RISK.get("max_capital", 100000) * RISK.get("max_daily_loss_pct", 3) / 100 * 4  # ~12% of capital
+
 st.set_page_config(
     page_title="TradeBot Monitor",
     page_icon="📈",
@@ -35,9 +42,9 @@ st.set_page_config(
 st.sidebar.title("TradeBot")
 st.sidebar.markdown("**Phase:** Paper Trading")
 
-symbol   = st.sidebar.selectbox("Symbol",    ["BANKNIFTY", "NIFTY", "CRUDEOIL"])
-broker   = st.sidebar.selectbox("Broker",    ["zerodha", "shoonya", "paper"])
-capital  = st.sidebar.number_input("Capital (₹)", value=100000, step=10000)
+symbol   = st.sidebar.selectbox("Symbol",    _SYMBOLS)
+broker   = st.sidebar.selectbox("Broker",    _BROKERS)
+capital  = st.sidebar.number_input(f"Capital ({_CUR})", value=int(RISK.get("max_capital", 100000)), step=10000)
 auto_ref = st.sidebar.checkbox("Auto-refresh (30s)", value=True)
 
 st.sidebar.markdown("---")
@@ -49,7 +56,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("**Gate thresholds**")
 st.sidebar.markdown("Win rate: ≥ 55%")
 st.sidebar.markdown("Profit factor: ≥ 1.4")
-st.sidebar.markdown("Max drawdown: < ₹12,000")
+st.sidebar.markdown(f"Max drawdown: < {_CUR}{_MAX_DD:,.0f}")
 st.sidebar.markdown("Min trades: 200")
 
 # ── Load latest paper trade log ───────────────────────────
@@ -96,11 +103,11 @@ else:
     total_pnl = win_rate = n_trades = pf = max_dd = 0
 
 pnl_color = "normal" if total_pnl >= 0 else "inverse"
-col1.metric("Total P&L", f"₹{total_pnl:,.0f}", delta=f"₹{total_pnl:,.0f}")
+col1.metric("Total P&L", f"{_CUR}{total_pnl:,.0f}", delta=f"{_CUR}{total_pnl:,.0f}")
 col2.metric("Win Rate",  f"{win_rate:.1f}%",   delta=f"Target: 55%")
 col3.metric("Trades",    str(n_trades),          delta=f"Target: 200+")
 col4.metric("Profit Factor", f"{pf:.2f}",        delta="Target: 1.4")
-col5.metric("Max Drawdown",  f"₹{abs(max_dd):,.0f}", delta="Limit: ₹12,000")
+col5.metric("Max Drawdown",  f"{_CUR}{abs(max_dd):,.0f}", delta=f"Limit: {_CUR}{_MAX_DD:,.0f}")
 
 # ── Gate check ────────────────────────────────────────────
 st.markdown("---")
@@ -114,7 +121,7 @@ def gate_badge(passed: bool, label: str):
 
 with g1: gate_badge(win_rate >= 55,      f"Win rate {win_rate:.1f}%")
 with g2: gate_badge(pf >= 1.4,           f"Profit factor {pf:.2f}")
-with g3: gate_badge(abs(max_dd) < 12000, f"Drawdown ₹{abs(max_dd):,.0f}")
+with g3: gate_badge(abs(max_dd) < _MAX_DD, f"Drawdown {_CUR}{abs(max_dd):,.0f}")
 with g4: gate_badge(n_trades >= 200,     f"{n_trades} trades")
 
 # ── Equity curve ──────────────────────────────────────────

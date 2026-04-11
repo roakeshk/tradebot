@@ -25,7 +25,9 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional
 
-from config.settings import ALERTS
+from config.settings import ALERTS, MARKET
+
+_CUR = "$" if MARKET == "US" else "₹"
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +78,9 @@ class Notifier:
         emoji = "✅" if pnl >= 0 else "❌"
         msg = (
             f"{emoji} Daily Summary — {datetime.now():%d %b %Y}\n"
-            f"P&L:     ₹{pnl:,.0f}\n"
+            f"P&L:     {_CUR}{pnl:,.0f}\n"
             f"Trades:  {summary.get('trades_today', 0)}\n"
-            f"Capital: ₹{summary.get('capital', 0):,.0f}\n"
+            f"Capital: {_CUR}{summary.get('capital', 0):,.0f}\n"
             f"Status:  {'HALTED' if summary.get('halted') else 'Active'}"
         )
         self.send(msg, level="INFO")

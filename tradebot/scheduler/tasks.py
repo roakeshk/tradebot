@@ -30,7 +30,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.logger import setup_logging
-from config.settings import DATA_SOURCE, ACTIVE_BROKER, INSTRUMENTS, TIMEFRAMES
+from config.settings import DATA_SOURCE, ACTIVE_BROKER, INSTRUMENTS, TIMEFRAMES, MARKET
+
+_CUR = "$" if MARKET == "US" else "₹"
 
 
 def task_refresh_tokens() -> None:
@@ -167,7 +169,7 @@ def task_daily_summary() -> None:
         "halted":       False,
     }
     notifier.send_daily_summary(summary)
-    logger.info(f"Summary sent: P&L=₹{total_pnl:,.0f} trades={trades} WR={wr:.0f}%")
+    logger.info(f"Summary sent: P&L={_CUR}{total_pnl:,.0f} trades={trades} WR={wr:.0f}%")
 
 
 def main():
