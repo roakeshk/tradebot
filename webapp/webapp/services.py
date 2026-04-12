@@ -158,8 +158,9 @@ class DashboardService:
     def get_reports(self) -> dict[str, Any]:
         return self.database.report_breakdown()
 
-    def simulation_start(self, market_id: str, speed: int, auto_trade: bool, threshold: float) -> dict[str, Any]:
-        return self.simulator.start(market_id, speed, auto_trade, threshold)
+    def simulation_start(self, market_id: str, speed: int, auto_trade: bool, threshold: float,
+                         direction_filter: str = "both", max_trades: int = 0, capital: float = RISK_CAPITAL) -> dict[str, Any]:
+        return self.simulator.start(market_id, speed, auto_trade, threshold, direction_filter, max_trades, capital)
 
     def simulation_stop(self) -> dict[str, Any]:
         return self.simulator.stop()

@@ -23,6 +23,9 @@ class DemoSimulator(threading.Thread):
         speed: int = 5,
         auto_trade: bool = True,
         min_confidence: float = DEFAULT_SIGNAL_THRESHOLD,
+        direction_filter: str = "both",
+        max_trades: int = 0,
+        capital: float = RISK_CAPITAL,
     ) -> None:
         super().__init__(daemon=True)
         self.database = database
@@ -32,9 +35,11 @@ class DemoSimulator(threading.Thread):
         self.speed = max(1, speed)
         self.auto_trade = auto_trade
         self.min_confidence = min_confidence
+        self.direction_filter = direction_filter
+        self.max_trades = max_trades
         self._stop_event = threading.Event()
         self.started_at: str | None = None
-        self.capital = RISK_CAPITAL
+        self.capital = capital
         self.daily_pnl = 0.0
         self.trades_count = 0
         self.open_positions = 0
@@ -63,6 +68,8 @@ class DemoSimulator(threading.Thread):
             "elapsed": elapsed,
             "auto_trade": self.auto_trade,
             "threshold": self.min_confidence,
+            "direction_filter": self.direction_filter,
+            "max_trades": self.max_trades,
         }
 
     def run(self) -> None:
@@ -159,8 +166,14 @@ class DemoSimulator(threading.Thread):
         signal = analysis["signal"]
         symbol = signal["symbol"]
         market_id = signal["market_id"]
-        latest = self.buffer.latest(symbol) or {"close": signal["entry_price"]}
         direction = signal["direction"]
+        if self.direction_filter == "long_only" and direction != "LONG":
+            return
+        if self.direction_filter == "short_only" and direction != "SHORT":
+            return
+        if self.max_trades > 0 and self.trades_count >= self.max_trades:
+            return
+        latest = self.buffer.latest(symbol) or {"close": signal["entry_price"]}
         entry_price = float(latest["close"])
         confidence = float(signal["confidence"])
         hold_steps = random.randint(2, 6)
@@ -234,7 +247,8 @@ class SimulatorManager:
         self._lock = threading.Lock()
         self._simulator: DemoSimulator | None = None
 
-    def start(self, market_id: str, speed: int, auto_trade: bool, threshold: float) -> dict[str, Any]:
+    def start(self, market_id: str, speed: int, auto_trade: bool, threshold: float,
+              direction_filter: str = "both", max_trades: int = 0, capital: float = RISK_CAPITAL) -> dict[str, Any]:
         with self._lock:
             if self._simulator and self._simulator.running:
                 self._simulator.stop()
@@ -247,6 +261,9 @@ class SimulatorManager:
                 speed=speed,
                 auto_trade=auto_trade,
                 min_confidence=threshold,
+                direction_filter=direction_filter,
+                max_trades=max_trades,
+                capital=capital,
             )
             self._simulator.start()
             return self._simulator.status_dict()

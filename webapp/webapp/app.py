@@ -147,7 +147,10 @@ def create_app() -> Flask:
         speed = int(payload.get("speed", 5))
         auto_trade = bool(payload.get("auto_trade", True))
         threshold = float(payload.get("threshold", DEFAULT_SIGNAL_THRESHOLD))
-        return jsonify(service.simulation_start(market_id, speed, auto_trade, threshold))
+        direction_filter = payload.get("direction_filter", "both")
+        max_trades = int(payload.get("max_trades", 0))
+        capital = float(payload.get("capital", RISK_CAPITAL))
+        return jsonify(service.simulation_start(market_id, speed, auto_trade, threshold, direction_filter, max_trades, capital))
 
     @app.route("/api/sim/stop", methods=["POST"])
     def api_sim_stop():
